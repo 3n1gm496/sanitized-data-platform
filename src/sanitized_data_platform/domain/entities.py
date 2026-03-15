@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .enums import (
+    BaselineStatus,
     DatabaseEngine,
     DatasetMode,
     EnvironmentType,
@@ -62,6 +63,42 @@ class DatasetProfile:
     preserve_constraints: bool = True
     requires_approval: bool = False
     active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SanitizedBaseline:
+    baseline_id: str
+    system_id: str
+    system_name: str
+    source_id: str
+    dataset_profile_id: str
+    target_environment_type: EnvironmentType
+    engine_type: DatabaseEngine
+    version: str
+    status: BaselineStatus
+    created_at: datetime
+    refreshed_at: datetime
+    active: bool = True
+
+    @property
+    def is_selectable(self) -> bool:
+        return self.active and self.status == BaselineStatus.ACTIVE
+
+    def is_compatible_with(
+        self,
+        *,
+        source: DataSource,
+        target: TargetEnvironment,
+        profile: DatasetProfile,
+    ) -> bool:
+        return (
+            self.is_selectable
+            and self.system_id == source.system_id
+            and self.dataset_profile_id == profile.profile_id
+            and self.target_environment_type == target.environment_type
+            and self.engine_type == source.engine_type
+            and self.engine_type == target.engine_type
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +228,7 @@ class AuditEvent:
 class PublishJob:
     job_id: str
     source_id: str
+    sanitized_baseline_id: str | None
     target_environment_id: str
     dataset_profile_id: str
     requested_by: str
@@ -205,6 +243,7 @@ class PublishJob:
         *,
         job_id: str,
         source_id: str,
+        sanitized_baseline_id: str | None,
         target_environment_id: str,
         dataset_profile_id: str,
         requested_by: str,
@@ -213,6 +252,7 @@ class PublishJob:
         return cls(
             job_id=job_id,
             source_id=source_id,
+            sanitized_baseline_id=sanitized_baseline_id,
             target_environment_id=target_environment_id,
             dataset_profile_id=dataset_profile_id,
             requested_by=requested_by,

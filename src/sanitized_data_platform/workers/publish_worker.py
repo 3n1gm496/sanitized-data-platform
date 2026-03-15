@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sanitized_data_platform.application.ports import (
     AuditEventRepository,
+    BaselineRepository,
     ClockPort,
     DataSourceRepository,
     DatasetProfileRepository,
@@ -22,6 +23,7 @@ class PublishWorker:
         *,
         queue: JobQueuePort,
         jobs: PublishJobRepository,
+        baselines: BaselineRepository,
         data_sources: DataSourceRepository,
         environments: TargetEnvironmentRepository,
         dataset_profiles: DatasetProfileRepository,
@@ -32,6 +34,7 @@ class PublishWorker:
     ) -> None:
         self._queue = queue
         self._jobs = jobs
+        self._baselines = baselines
         self._data_sources = data_sources
         self._environments = environments
         self._dataset_profiles = dataset_profiles
@@ -50,10 +53,17 @@ class PublishWorker:
             raise DomainError(f"Queued publish job not found: {job_id}")
 
         source = self._data_sources.get_by_id(job.source_id)
+        baseline = (
+            None
+            if job.sanitized_baseline_id is None
+            else self._baselines.get_by_id(job.sanitized_baseline_id)
+        )
         target = self._environments.get_by_id(job.target_environment_id)
         profile = self._dataset_profiles.get_by_id(job.dataset_profile_id)
         if source is None or target is None or profile is None:
             raise DomainError("Publish job references missing source, target, or profile.")
+        if profile.uses_sanitized_baseline and baseline is None:
+            raise DomainError("Publish job references a missing sanitized baseline.")
 
         try:
             planning_time = self._clock.now()
@@ -64,6 +74,7 @@ class PublishWorker:
             summary = self._pipeline.execute(
                 job=job,
                 source=source,
+                baseline=baseline,
                 target=target,
                 profile=profile,
             )

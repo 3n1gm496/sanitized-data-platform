@@ -6,6 +6,7 @@ from tests.fakes import (
     AllowAllPolicy,
     FakeClock,
     InMemoryAuditEventRepository,
+    InMemoryBaselineRepository,
     InMemoryDataSourceRepository,
     InMemoryDatasetProfileRepository,
     InMemoryJobQueue,
@@ -13,7 +14,9 @@ from tests.fakes import (
     InMemoryTargetEnvironmentRepository,
     SequentialIdGenerator,
     StubPublishPipeline,
+    build_publish_source_resolution_service,
     build_readiness_service,
+    sample_baseline,
     sample_profile,
     sample_source,
     sample_target,
@@ -24,6 +27,7 @@ def test_worker_processes_enqueued_job_to_completion():
     source_repo = InMemoryDataSourceRepository([sample_source()])
     target_repo = InMemoryTargetEnvironmentRepository([sample_target()])
     profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
+    baseline_repo = InMemoryBaselineRepository([sample_baseline()])
     job_repo = InMemoryPublishJobRepository()
     audit_repo = InMemoryAuditEventRepository()
     queue = InMemoryJobQueue()
@@ -39,6 +43,7 @@ def test_worker_processes_enqueued_job_to_completion():
         queue=queue,
         policy=AllowAllPolicy(),
         readiness=build_readiness_service(clock=clock),
+        publish_source_resolution=build_publish_source_resolution_service(),
         clock=clock,
         ids=ids,
     )
@@ -54,6 +59,7 @@ def test_worker_processes_enqueued_job_to_completion():
     worker = PublishWorker(
         queue=queue,
         jobs=job_repo,
+        baselines=baseline_repo,
         data_sources=source_repo,
         environments=target_repo,
         dataset_profiles=profile_repo,
@@ -70,6 +76,8 @@ def test_worker_processes_enqueued_job_to_completion():
     assert processed_job_id == created.job_id
     assert completed_job is not None
     assert completed_job.status.value == "completed"
+    assert completed_job.sanitized_baseline_id == "baseline-crm-dev-v1"
+    assert completed_job.execution_summary["baselineId"] == "baseline-crm-dev-v1"
     assert completed_job.execution_summary["validationStatus"] == "pending-real-implementation"
     assert [event.event_type for event in audit_events] == [
         "publish_job_requested",

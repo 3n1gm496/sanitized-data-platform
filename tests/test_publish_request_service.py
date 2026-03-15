@@ -15,6 +15,7 @@ from tests.fakes import (
     InMemoryPublishJobRepository,
     InMemoryTargetEnvironmentRepository,
     SequentialIdGenerator,
+    build_publish_source_resolution_service,
     build_readiness_service,
     sample_profile,
     sample_source,
@@ -32,6 +33,7 @@ def build_service():
         queue=InMemoryJobQueue(),
         policy=AllowAllPolicy(),
         readiness=build_readiness_service(),
+        publish_source_resolution=build_publish_source_resolution_service(),
         clock=FakeClock(),
         ids=SequentialIdGenerator(),
     )
@@ -51,6 +53,7 @@ def test_create_job_persists_and_queues_publish_request():
 
     assert job.job_id == "job-1"
     assert job.status == "pending"
+    assert job.sanitized_baseline_id == "baseline-crm-dev-v1"
     assert job.execution_summary == {}
 
 
@@ -72,6 +75,7 @@ def test_create_job_rejects_engine_mismatch():
         queue=InMemoryJobQueue(),
         policy=AllowAllPolicy(),
         readiness=build_readiness_service(),
+        publish_source_resolution=build_publish_source_resolution_service(),
         clock=FakeClock(),
         ids=SequentialIdGenerator(),
     )

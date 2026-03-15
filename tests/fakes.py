@@ -17,12 +17,14 @@ from sanitized_data_platform.domain.entities import (
     MetadataObject,
     PublishJob,
     Relationship,
+    SanitizedBaseline,
     SensitivityTag,
     System,
     TargetEnvironment,
     TransformationPolicy,
 )
 from sanitized_data_platform.domain.enums import (
+    BaselineStatus,
     DatabaseEngine,
     DatasetMode,
     EnvironmentType,
@@ -98,6 +100,21 @@ class InMemoryDatasetProfileRepository:
 
     def get_by_id(self, profile_id: str) -> DatasetProfile | None:
         return self._items.get(profile_id)
+
+
+class InMemoryBaselineRepository:
+    def __init__(self, items: list[SanitizedBaseline]) -> None:
+        self._items = {item.baseline_id: item for item in items}
+
+    def list_active_for_system(self, system_id: str) -> list[SanitizedBaseline]:
+        return [
+            item
+            for item in self._items.values()
+            if item.system_id == system_id and item.active
+        ]
+
+    def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None:
+        return self._items.get(baseline_id)
 
 
 class InMemoryMetadataCatalogRepository:
@@ -184,8 +201,10 @@ class AllowAllPolicy:
 
 class StubPublishPipeline:
     def execute(self, **kwargs) -> dict[str, object]:
+        baseline = kwargs.get("baseline")
         return {
-            "baselineStrategy": "precomputed_or_generate",
+            "baselineStrategy": "selected_active_baseline",
+            "baselineId": None if baseline is None else baseline.baseline_id,
             "rowsPublished": 0,
             "validationStatus": "pending-real-implementation",
         }
@@ -264,6 +283,26 @@ def sample_metadata_objects() -> list[MetadataObject]:
             logical_data_type="string",
         ),
     ]
+
+
+def sample_baseline() -> SanitizedBaseline:
+    source = sample_source()
+    target = sample_target()
+    profile = sample_profile()
+    refreshed_at = datetime(2026, 1, 1, 6, tzinfo=timezone.utc)
+    return SanitizedBaseline(
+        baseline_id="baseline-crm-dev-v1",
+        system_id=source.system_id,
+        system_name=source.system_name,
+        source_id=source.source_id,
+        dataset_profile_id=profile.profile_id,
+        target_environment_type=target.environment_type,
+        engine_type=source.engine_type,
+        version="2026.01.01.1",
+        status=BaselineStatus.ACTIVE,
+        created_at=refreshed_at,
+        refreshed_at=refreshed_at,
+    )
 
 
 def sample_sensitivity_tags() -> list[SensitivityTag]:
@@ -372,4 +411,22 @@ def build_policy_coverage_query_service(
         systems=InMemorySystemRepository([sample_system()]),
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         coverage=build_coverage_evaluation_service(clock=coverage_clock),
+    )
+
+
+def build_publish_source_resolution_service(
+    *,
+    baselines: list[SanitizedBaseline] | None = None,
+):
+    from sanitized_data_platform.application.services import (
+        BaselineSelectionService,
+        PublishSourceResolutionService,
+    )
+
+    return PublishSourceResolutionService(
+        BaselineSelectionService(
+            InMemoryBaselineRepository(
+                [sample_baseline()] if baselines is None else baselines
+            )
+        )
     )

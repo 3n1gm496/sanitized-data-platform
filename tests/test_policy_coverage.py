@@ -21,6 +21,7 @@ from tests.fakes import (
     InMemoryTargetEnvironmentRepository,
     InMemoryTransformationPolicyRepository,
     SequentialIdGenerator,
+    build_publish_source_resolution_service,
     sample_metadata_objects,
     sample_profile,
     sample_sensitivity_tags,
@@ -101,6 +102,7 @@ def test_publish_request_is_refused_when_blocking_policy_gap_exists():
         queue=queue,
         policy=AllowAllPolicy(),
         readiness=readiness,
+        publish_source_resolution=build_publish_source_resolution_service(),
         clock=clock,
         ids=ids,
     )

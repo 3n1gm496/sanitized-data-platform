@@ -6,6 +6,7 @@ from sanitized_data_platform.domain.entities import (
     PolicyCoverageGap,
     PolicyCoverageReport,
     PublishJob,
+    SanitizedBaseline,
 )
 from sanitized_data_platform.domain.errors import DomainError
 from sanitized_data_platform.domain.enums import (
@@ -25,6 +26,7 @@ from .dto import (
 )
 from .ports import (
     AuditEventRepository,
+    BaselineRepository,
     ClassificationRepository,
     ClockPort,
     DataSourceRepository,
@@ -306,6 +308,68 @@ class PublishReadinessValidationService:
         return report
 
 
+class BaselineLookupService:
+    def __init__(self, baselines: BaselineRepository) -> None:
+        self._baselines = baselines
+
+    def list_active_for_system(self, system_id: str) -> list[SanitizedBaseline]:
+        return [
+            baseline
+            for baseline in self._baselines.list_active_for_system(system_id)
+            if baseline.is_selectable
+        ]
+
+
+class BaselineSelectionService:
+    def __init__(self, baselines: BaselineRepository) -> None:
+        self._baselines = baselines
+
+    def select_for_publish(
+        self,
+        *,
+        source: DataSource,
+        target,
+        profile,
+    ) -> SanitizedBaseline:
+        candidates = self._baselines.list_active_for_system(source.system_id)
+        compatible = [
+            baseline
+            for baseline in candidates
+            if baseline.is_compatible_with(
+                source=source,
+                target=target,
+                profile=profile,
+            )
+        ]
+        if not compatible:
+            raise DomainError(
+                "No compatible active sanitized baseline is available for the selected"
+                " system, profile, and target environment."
+            )
+        compatible.sort(key=lambda baseline: baseline.refreshed_at, reverse=True)
+        return compatible[0]
+
+
+class PublishSourceResolutionService:
+    def __init__(self, baseline_selection: BaselineSelectionService) -> None:
+        self._baseline_selection = baseline_selection
+
+    def resolve_for_publish(
+        self,
+        *,
+        source: DataSource,
+        target,
+        profile,
+    ) -> SanitizedBaseline | None:
+        if not profile.uses_sanitized_baseline:
+            return None
+        return self._baseline_selection.select_for_publish(
+            source=source,
+            target=target,
+            profile=profile,
+        )
+
+
 class PolicyCoverageQueryService:
     def __init__(
         self,
@@ -341,6 +405,7 @@ class PublishRequestService:
         queue: JobQueuePort,
         policy: PolicyPort,
         readiness: PublishReadinessValidationService,
+        publish_source_resolution: PublishSourceResolutionService,
         clock: ClockPort,
         ids: IdGeneratorPort,
     ) -> None:
@@ -352,6 +417,7 @@ class PublishRequestService:
         self._queue = queue
         self._policy = policy
         self._readiness = readiness
+        self._publish_source_resolution = publish_source_resolution
         self._clock = clock
         self._ids = ids
 
@@ -378,11 +444,19 @@ class PublishRequestService:
             requested_by=command.requested_by,
         )
         self._readiness.assert_publish_ready(source)
+        selected_baseline = self._publish_source_resolution.resolve_for_publish(
+            source=source,
+            target=target,
+            profile=profile,
+        )
 
         now = self._clock.now()
         job = PublishJob.create(
             job_id=self._ids.new_id("job"),
             source_id=source.source_id,
+            sanitized_baseline_id=(
+                None if selected_baseline is None else selected_baseline.baseline_id
+            ),
             target_environment_id=target.environment_id,
             dataset_profile_id=profile.profile_id,
             requested_by=command.requested_by,
@@ -400,6 +474,7 @@ class PublishRequestService:
                 subject_id=job.job_id,
                 details={
                     "sourceId": source.source_id,
+                    "sanitizedBaselineId": job.sanitized_baseline_id,
                     "targetEnvironmentId": target.environment_id,
                     "datasetProfileId": profile.profile_id,
                 },

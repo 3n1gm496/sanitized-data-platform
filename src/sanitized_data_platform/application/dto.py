@@ -33,6 +33,7 @@ class JobView:
     job_id: str
     status: str
     source_id: str
+    sanitized_baseline_id: str | None
     target_environment_id: str
     dataset_profile_id: str
     requested_by: str
@@ -46,6 +47,7 @@ class JobView:
             job_id=job.job_id,
             status=job.status.value,
             source_id=job.source_id,
+            sanitized_baseline_id=job.sanitized_baseline_id,
             target_environment_id=job.target_environment_id,
             dataset_profile_id=job.dataset_profile_id,
             requested_by=job.requested_by,

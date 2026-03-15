@@ -13,6 +13,7 @@ from tests.fakes import (
     AllowAllPolicy,
     FakeClock,
     InMemoryAuditEventRepository,
+    InMemoryBaselineRepository,
     InMemoryClassificationRepository,
     InMemoryDataSourceRepository,
     InMemoryDatasetProfileRepository,
@@ -23,7 +24,9 @@ from tests.fakes import (
     InMemoryTargetEnvironmentRepository,
     InMemoryTransformationPolicyRepository,
     SequentialIdGenerator,
+    build_publish_source_resolution_service,
     build_readiness_service,
+    sample_baseline,
     sample_metadata_objects,
     sample_profile,
     sample_sensitivity_tags,
@@ -39,6 +42,7 @@ def build_api() -> ApiApp:
     system_repo = InMemorySystemRepository([sample_system()])
     target_repo = InMemoryTargetEnvironmentRepository([sample_target()])
     profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
+    baseline_repo = InMemoryBaselineRepository([sample_baseline()])
     job_repo = InMemoryPublishJobRepository()
     audit_repo = InMemoryAuditEventRepository()
     queue = InMemoryJobQueue()
@@ -61,6 +65,7 @@ def build_api() -> ApiApp:
         queue=queue,
         policy=AllowAllPolicy(),
         readiness=build_readiness_service(clock=clock),
+        publish_source_resolution=build_publish_source_resolution_service(),
         clock=clock,
         ids=ids,
     )
@@ -109,6 +114,7 @@ def test_api_lists_systems_and_creates_job():
     assert systems_response.body[0]["name"] == "CRM"
     assert create_response.status_code == 202
     assert create_response.body["status"] == "pending"
+    assert create_response.body["sanitized_baseline_id"] == "baseline-crm-dev-v1"
 
 
 def test_api_exposes_metadata_policies_and_policy_coverage():

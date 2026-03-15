@@ -10,6 +10,7 @@ from sanitized_data_platform.domain.entities import (
     MetadataObject,
     PublishJob,
     Relationship,
+    SanitizedBaseline,
     SensitivityTag,
     System,
     TargetEnvironment,
@@ -45,6 +46,11 @@ class TargetEnvironmentRepository(Protocol):
 class DatasetProfileRepository(Protocol):
     def list_active(self) -> list[DatasetProfile]: ...
     def get_by_id(self, profile_id: str) -> DatasetProfile | None: ...
+
+
+class BaselineRepository(Protocol):
+    def list_active_for_system(self, system_id: str) -> list[SanitizedBaseline]: ...
+    def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None: ...
 
 
 class MetadataCatalogRepository(Protocol):
@@ -98,6 +104,7 @@ class PublishPipelinePort(Protocol):
         *,
         job: PublishJob,
         source: DataSource,
+        baseline: SanitizedBaseline | None,
         target: TargetEnvironment,
         profile: DatasetProfile,
     ) -> dict[str, object]: ...

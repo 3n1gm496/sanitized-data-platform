@@ -56,3 +56,10 @@ class MetadataObjectType(str, Enum):
 class PolicyCoverageSeverity(str, Enum):
     BLOCKING = "blocking"
     INFORMATIONAL = "informational"
+
+
+class BaselineStatus(str, Enum):
+    ACTIVE = "active"
+    REFRESHING = "refreshing"
+    FAILED = "failed"
+    DEPRECATED = "deprecated"
