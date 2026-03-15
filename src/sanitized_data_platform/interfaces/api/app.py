@@ -7,6 +7,9 @@ from sanitized_data_platform.application.dto import CreatePublishJobCommand
 from sanitized_data_platform.application.services import (
     CatalogQueryService,
     JobMonitoringService,
+    MetadataQueryService,
+    PolicyCoverageQueryService,
+    PolicyQueryService,
     PublishRequestService,
 )
 from sanitized_data_platform.domain.errors import DomainError
@@ -25,10 +28,16 @@ class ApiApp:
         self,
         *,
         catalog: CatalogQueryService,
+        metadata_queries: MetadataQueryService,
+        policy_queries: PolicyQueryService,
+        policy_coverage_queries: PolicyCoverageQueryService,
         publish_requests: PublishRequestService,
         job_monitoring: JobMonitoringService,
     ) -> None:
         self._catalog = catalog
+        self._metadata_queries = metadata_queries
+        self._policy_queries = policy_queries
+        self._policy_coverage_queries = policy_coverage_queries
         self._publish_requests = publish_requests
         self._job_monitoring = job_monitoring
 
@@ -61,6 +70,24 @@ class ApiApp:
                     status_code=200,
                     body=[asdict(profile) for profile in profiles],
                 )
+
+            if method == "GET" and path.startswith("/api/v1/metadata/systems/"):
+                system_id = path.removeprefix("/api/v1/metadata/systems/")
+                metadata = self._metadata_queries.list_metadata_objects(system_id)
+                return ApiResponse(status_code=200, body=asdict(metadata))
+
+            if method == "GET" and path == "/api/v1/policies":
+                policies = self._policy_queries.list_transformation_policies(
+                    system_id=query.get("systemId"),
+                    object_name=query.get("objectName"),
+                    column_name=query.get("columnName"),
+                )
+                return ApiResponse(status_code=200, body=asdict(policies))
+
+            if method == "GET" and path.startswith("/api/v1/policy-coverage/"):
+                system_id = path.removeprefix("/api/v1/policy-coverage/")
+                report = self._policy_coverage_queries.get_policy_coverage(system_id)
+                return ApiResponse(status_code=200, body=asdict(report))
 
             if method == "POST" and path == "/api/v1/jobs":
                 command = CreatePublishJobCommand(

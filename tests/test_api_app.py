@@ -1,6 +1,10 @@
 from sanitized_data_platform.application.services import (
     CatalogQueryService,
     JobMonitoringService,
+    MetadataQueryService,
+    PolicyCoverageQueryService,
+    PolicyCoverageEvaluationService,
+    PolicyQueryService,
     PublishRequestService,
 )
 from sanitized_data_platform.interfaces.api.app import ApiApp
@@ -9,16 +13,22 @@ from tests.fakes import (
     AllowAllPolicy,
     FakeClock,
     InMemoryAuditEventRepository,
+    InMemoryClassificationRepository,
     InMemoryDataSourceRepository,
     InMemoryDatasetProfileRepository,
     InMemoryJobQueue,
+    InMemoryMetadataCatalogRepository,
     InMemoryPublishJobRepository,
     InMemoryTargetEnvironmentRepository,
+    InMemoryTransformationPolicyRepository,
     SequentialIdGenerator,
     build_readiness_service,
+    sample_metadata_objects,
     sample_profile,
+    sample_sensitivity_tags,
     sample_source,
     sample_target,
+    sample_transformation_policies,
 )
 
 
@@ -33,6 +43,12 @@ def build_api() -> ApiApp:
     ids = SequentialIdGenerator()
 
     catalog = CatalogQueryService(source_repo, target_repo, profile_repo)
+    coverage = PolicyCoverageEvaluationService(
+        metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
+        policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
+        classifications=InMemoryClassificationRepository(sample_sensitivity_tags()),
+        clock=clock,
+    )
     requests = PublishRequestService(
         data_sources=source_repo,
         environments=target_repo,
@@ -46,7 +62,26 @@ def build_api() -> ApiApp:
         ids=ids,
     )
     monitoring = JobMonitoringService(job_repo, audit_repo)
-    return ApiApp(catalog=catalog, publish_requests=requests, job_monitoring=monitoring)
+    metadata_queries = MetadataQueryService(
+        data_sources=source_repo,
+        metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
+    )
+    policy_queries = PolicyQueryService(
+        data_sources=source_repo,
+        policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
+    )
+    policy_coverage_queries = PolicyCoverageQueryService(
+        data_sources=source_repo,
+        coverage=coverage,
+    )
+    return ApiApp(
+        catalog=catalog,
+        metadata_queries=metadata_queries,
+        policy_queries=policy_queries,
+        policy_coverage_queries=policy_coverage_queries,
+        publish_requests=requests,
+        job_monitoring=monitoring,
+    )
 
 
 def test_api_lists_systems_and_creates_job():
@@ -68,3 +103,28 @@ def test_api_lists_systems_and_creates_job():
     assert systems_response.body[0]["name"] == "CRM"
     assert create_response.status_code == 202
     assert create_response.body["status"] == "pending"
+
+
+def test_api_exposes_metadata_policies_and_policy_coverage():
+    app = build_api()
+
+    metadata_response = app.handle("GET", "/api/v1/metadata/systems/crm")
+    policies_response = app.handle(
+        "GET",
+        "/api/v1/policies",
+        query={"systemId": "crm", "objectName": "crm.customers", "columnName": "email"},
+    )
+    coverage_response = app.handle("GET", "/api/v1/policy-coverage/crm")
+
+    assert metadata_response.status_code == 200
+    assert metadata_response.body["system_id"] == "crm"
+    assert len(metadata_response.body["items"]) == 3
+
+    assert policies_response.status_code == 200
+    assert policies_response.body["filters"]["systemId"] == "crm"
+    assert policies_response.body["items"][0]["column_name"] == "email"
+
+    assert coverage_response.status_code == 200
+    assert coverage_response.body["system_id"] == "crm"
+    assert coverage_response.body["publish_ready"] is True
+    assert coverage_response.body["informational_gap_count"] == 1

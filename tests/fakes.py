@@ -4,7 +4,10 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from sanitized_data_platform.application.services import (
+    MetadataQueryService,
     PolicyCoverageEvaluationService,
+    PolicyCoverageQueryService,
+    PolicyQueryService,
     PublishReadinessValidationService,
 )
 from sanitized_data_platform.domain.entities import (
@@ -288,3 +291,54 @@ def build_readiness_service(
         clock=service_clock,
     )
     return PublishReadinessValidationService(coverage)
+
+
+def build_coverage_evaluation_service(
+    *,
+    metadata_objects: list[MetadataObject] | None = None,
+    relationships: list[Relationship] | None = None,
+    sensitivity_tags: list[SensitivityTag] | None = None,
+    transformation_policies: list[TransformationPolicy] | None = None,
+    clock: FakeClock | None = None,
+) -> PolicyCoverageEvaluationService:
+    service_clock = clock or FakeClock()
+    return PolicyCoverageEvaluationService(
+        metadata_catalog=InMemoryMetadataCatalogRepository(
+            sample_metadata_objects() if metadata_objects is None else metadata_objects,
+            [] if relationships is None else relationships,
+        ),
+        policies=InMemoryTransformationPolicyRepository(
+            sample_transformation_policies()
+            if transformation_policies is None
+            else transformation_policies
+        ),
+        classifications=InMemoryClassificationRepository(
+            sample_sensitivity_tags() if sensitivity_tags is None else sensitivity_tags
+        ),
+        clock=service_clock,
+    )
+
+
+def build_metadata_query_service() -> MetadataQueryService:
+    return MetadataQueryService(
+        data_sources=InMemoryDataSourceRepository([sample_source()]),
+        metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
+    )
+
+
+def build_policy_query_service() -> PolicyQueryService:
+    return PolicyQueryService(
+        data_sources=InMemoryDataSourceRepository([sample_source()]),
+        policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
+    )
+
+
+def build_policy_coverage_query_service(
+    *,
+    clock: FakeClock | None = None,
+) -> PolicyCoverageQueryService:
+    coverage_clock = clock or FakeClock()
+    return PolicyCoverageQueryService(
+        data_sources=InMemoryDataSourceRepository([sample_source()]),
+        coverage=build_coverage_evaluation_service(clock=coverage_clock),
+    )

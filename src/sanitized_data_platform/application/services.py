@@ -9,12 +9,20 @@ from sanitized_data_platform.domain.entities import (
 )
 from sanitized_data_platform.domain.errors import DomainError
 from sanitized_data_platform.domain.enums import (
-    JobStatus,
     MetadataObjectType,
     PolicyCoverageSeverity,
 )
 
-from .dto import CreatePublishJobCommand, JobView, SystemSummary
+from .dto import (
+    CreatePublishJobCommand,
+    JobView,
+    MetadataCatalogView,
+    MetadataObjectView,
+    PolicyCoverageReportView,
+    PolicyListingView,
+    SystemSummary,
+    TransformationPolicyView,
+)
 from .ports import (
     AuditEventRepository,
     ClassificationRepository,
@@ -98,6 +106,92 @@ class CatalogQueryService:
             filtered.append(profile)
 
         return filtered
+
+
+def resolve_active_source_by_system_id(
+    data_sources: DataSourceRepository,
+    system_id: str,
+) -> DataSource:
+    normalized_system_id = system_id.strip().lower()
+    for source in data_sources.list_active():
+        if source.system_name.lower() == normalized_system_id:
+            return source
+    raise DomainError(f"Unknown system: {system_id}")
+
+
+class MetadataQueryService:
+    def __init__(
+        self,
+        *,
+        data_sources: DataSourceRepository,
+        metadata_catalog: MetadataCatalogRepository,
+    ) -> None:
+        self._data_sources = data_sources
+        self._metadata_catalog = metadata_catalog
+
+    def list_metadata_objects(self, system_id: str) -> MetadataCatalogView:
+        source = resolve_active_source_by_system_id(self._data_sources, system_id)
+        objects = [
+            MetadataObjectView.from_metadata_object(item)
+            for item in self._metadata_catalog.list_objects(source.source_id)
+            if item.active
+        ]
+        return MetadataCatalogView(
+            system_id=source.system_name.lower(),
+            system_name=source.system_name,
+            source_id=source.source_id,
+            items=objects,
+        )
+
+
+class PolicyQueryService:
+    def __init__(
+        self,
+        *,
+        data_sources: DataSourceRepository,
+        policies: TransformationPolicyRepository,
+    ) -> None:
+        self._data_sources = data_sources
+        self._policies = policies
+
+    def list_transformation_policies(
+        self,
+        *,
+        system_id: str | None = None,
+        object_name: str | None = None,
+        column_name: str | None = None,
+    ) -> PolicyListingView:
+        filters = {
+            key: value
+            for key, value in {
+                "systemId": system_id,
+                "objectName": object_name,
+                "columnName": column_name,
+            }.items()
+            if value is not None
+        }
+
+        if system_id is None:
+            source_by_name = {
+                source.system_name: source
+                for source in self._data_sources.list_active()
+            }
+            policies = []
+            for system_name in sorted(source_by_name):
+                policies.extend(self._policies.list_active_for_system(system_name))
+        else:
+            source = resolve_active_source_by_system_id(self._data_sources, system_id)
+            policies = self._policies.list_active_for_system(source.system_name)
+
+        if object_name is not None:
+            policies = [policy for policy in policies if policy.object_name == object_name]
+        if column_name is not None:
+            policies = [policy for policy in policies if policy.column_name == column_name]
+
+        return PolicyListingView(
+            filters=filters,
+            items=[TransformationPolicyView.from_policy(policy) for policy in policies],
+        )
 
 
 class PolicyCoverageEvaluationService:
@@ -185,6 +279,22 @@ class PublishReadinessValidationService:
                 f" for: {object_names}."
             )
         return report
+
+
+class PolicyCoverageQueryService:
+    def __init__(
+        self,
+        *,
+        data_sources: DataSourceRepository,
+        coverage: PolicyCoverageEvaluationService,
+    ) -> None:
+        self._data_sources = data_sources
+        self._coverage = coverage
+
+    def get_policy_coverage(self, system_id: str) -> PolicyCoverageReportView:
+        source = resolve_active_source_by_system_id(self._data_sources, system_id)
+        report = self._coverage.evaluate_for_source(source)
+        return PolicyCoverageReportView.from_report(report)
 
 
 class PublishRequestService:
