@@ -13,6 +13,8 @@ from .enums import (
     MetadataObjectType,
     PolicyCoverageSeverity,
     TransformationType,
+    ValidationSeverity,
+    ValidationStatus,
 )
 from .errors import DomainError
 
@@ -99,6 +101,38 @@ class SanitizedBaseline:
             and self.engine_type == source.engine_type
             and self.engine_type == target.engine_type
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationCheckResult:
+    check_name: str
+    severity: ValidationSeverity
+    passed: bool
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationReport:
+    report_id: str
+    baseline_id: str
+    status: ValidationStatus
+    checks: tuple[ValidationCheckResult, ...]
+    created_at: datetime
+
+    @property
+    def warning_count(self) -> int:
+        return sum(1 for check in self.checks if check.severity == ValidationSeverity.WARNING)
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for check in self.checks if check.severity == ValidationSeverity.ERROR)
+
+    @property
+    def is_publish_eligible(self) -> bool:
+        return self.status in {
+            ValidationStatus.PASSED,
+            ValidationStatus.PASSED_WITH_WARNINGS,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +263,10 @@ class PublishJob:
     job_id: str
     source_id: str
     sanitized_baseline_id: str | None
+    baseline_validation_status: ValidationStatus | None
+    baseline_validation_warning_count: int
+    baseline_validation_error_count: int
+    baseline_validated_at: datetime | None
     target_environment_id: str
     dataset_profile_id: str
     requested_by: str
@@ -244,6 +282,10 @@ class PublishJob:
         job_id: str,
         source_id: str,
         sanitized_baseline_id: str | None,
+        baseline_validation_status: ValidationStatus | None,
+        baseline_validation_warning_count: int,
+        baseline_validation_error_count: int,
+        baseline_validated_at: datetime | None,
         target_environment_id: str,
         dataset_profile_id: str,
         requested_by: str,
@@ -253,6 +295,10 @@ class PublishJob:
             job_id=job_id,
             source_id=source_id,
             sanitized_baseline_id=sanitized_baseline_id,
+            baseline_validation_status=baseline_validation_status,
+            baseline_validation_warning_count=baseline_validation_warning_count,
+            baseline_validation_error_count=baseline_validation_error_count,
+            baseline_validated_at=baseline_validated_at,
             target_environment_id=target_environment_id,
             dataset_profile_id=dataset_profile_id,
             requested_by=requested_by,

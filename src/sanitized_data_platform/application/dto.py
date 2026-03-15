@@ -9,7 +9,11 @@ from sanitized_data_platform.domain.entities import (
     PublishJob,
     TransformationPolicy,
 )
-from sanitized_data_platform.domain.enums import DatabaseEngine, EnvironmentType
+from sanitized_data_platform.domain.enums import (
+    DatabaseEngine,
+    EnvironmentType,
+    ValidationStatus,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +33,20 @@ class CreatePublishJobCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ValidationSummaryView:
+    status: str
+    warning_count: int
+    error_count: int
+    validated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class JobView:
     job_id: str
     status: str
     source_id: str
     sanitized_baseline_id: str | None
+    baseline_validation_summary: ValidationSummaryView | None
     target_environment_id: str
     dataset_profile_id: str
     requested_by: str
@@ -43,11 +56,21 @@ class JobView:
 
     @classmethod
     def from_job(cls, job: PublishJob) -> "JobView":
+        validation_summary = None
+        if job.baseline_validation_status is not None:
+            validation_summary = ValidationSummaryView(
+                status=job.baseline_validation_status.value,
+                warning_count=job.baseline_validation_warning_count,
+                error_count=job.baseline_validation_error_count,
+                validated_at=job.baseline_validated_at,
+            )
+
         return cls(
             job_id=job.job_id,
             status=job.status.value,
             source_id=job.source_id,
             sanitized_baseline_id=job.sanitized_baseline_id,
+            baseline_validation_summary=validation_summary,
             target_environment_id=job.target_environment_id,
             dataset_profile_id=job.dataset_profile_id,
             requested_by=job.requested_by,

@@ -54,6 +54,8 @@ def test_create_job_persists_and_queues_publish_request():
     assert job.job_id == "job-1"
     assert job.status == "pending"
     assert job.sanitized_baseline_id == "baseline-crm-dev-v1"
+    assert job.baseline_validation_summary is not None
+    assert job.baseline_validation_summary.status == "passed"
     assert job.execution_summary == {}
 
 

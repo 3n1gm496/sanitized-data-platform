@@ -115,6 +115,7 @@ def test_api_lists_systems_and_creates_job():
     assert create_response.status_code == 202
     assert create_response.body["status"] == "pending"
     assert create_response.body["sanitized_baseline_id"] == "baseline-crm-dev-v1"
+    assert create_response.body["baseline_validation_summary"]["status"] == "passed"
 
 
 def test_api_exposes_metadata_policies_and_policy_coverage():

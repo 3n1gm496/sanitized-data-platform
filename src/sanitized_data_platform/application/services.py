@@ -7,6 +7,7 @@ from sanitized_data_platform.domain.entities import (
     PolicyCoverageReport,
     PublishJob,
     SanitizedBaseline,
+    ValidationReport,
 )
 from sanitized_data_platform.domain.errors import DomainError
 from sanitized_data_platform.domain.enums import (
@@ -23,6 +24,7 @@ from .dto import (
     PolicyListingView,
     SystemSummary,
     TransformationPolicyView,
+    ValidationSummaryView,
 )
 from .ports import (
     AuditEventRepository,
@@ -39,6 +41,7 @@ from .ports import (
     SystemRepository,
     TargetEnvironmentRepository,
     TransformationPolicyRepository,
+    ValidationRepository,
 )
 
 
@@ -320,9 +323,51 @@ class BaselineLookupService:
         ]
 
 
+class ValidationLookupService:
+    def __init__(self, validations: ValidationRepository) -> None:
+        self._validations = validations
+
+    def get_latest_for_baseline(self, baseline_id: str) -> ValidationReport | None:
+        return self._validations.get_latest_for_baseline(baseline_id)
+
+
+class BaselineValidationEligibilityService:
+    def __init__(self, validations: ValidationLookupService) -> None:
+        self._validations = validations
+
+    def require_publish_eligible(self, baseline: SanitizedBaseline) -> ValidationReport:
+        report = self._validations.get_latest_for_baseline(baseline.baseline_id)
+        if report is None:
+            raise DomainError(
+                "No validation report is available for the selected sanitized baseline."
+            )
+        if not report.is_publish_eligible:
+            raise DomainError(
+                "The selected sanitized baseline is not sufficiently validated for publish."
+            )
+        return report
+
+
+class PublishValidationSummaryService:
+    def summarize(self, report: ValidationReport | None) -> ValidationSummaryView | None:
+        if report is None:
+            return None
+        return ValidationSummaryView(
+            status=report.status.value,
+            warning_count=report.warning_count,
+            error_count=report.error_count,
+            validated_at=report.created_at,
+        )
+
+
 class BaselineSelectionService:
-    def __init__(self, baselines: BaselineRepository) -> None:
+    def __init__(
+        self,
+        baselines: BaselineRepository,
+        validation_eligibility: BaselineValidationEligibilityService,
+    ) -> None:
         self._baselines = baselines
+        self._validation_eligibility = validation_eligibility
 
     def select_for_publish(
         self,
@@ -346,8 +391,19 @@ class BaselineSelectionService:
                 "No compatible active sanitized baseline is available for the selected"
                 " system, profile, and target environment."
             )
+
         compatible.sort(key=lambda baseline: baseline.refreshed_at, reverse=True)
-        return compatible[0]
+        for baseline in compatible:
+            try:
+                report = self._validation_eligibility.require_publish_eligible(baseline)
+                return baseline, report
+            except DomainError:
+                continue
+
+        raise DomainError(
+            "No compatible sufficiently validated sanitized baseline is available for the"
+            " selected system, profile, and target environment."
+        )
 
 
 class PublishSourceResolutionService:
@@ -360,9 +416,9 @@ class PublishSourceResolutionService:
         source: DataSource,
         target,
         profile,
-    ) -> SanitizedBaseline | None:
+    ) -> tuple[SanitizedBaseline | None, ValidationReport | None]:
         if not profile.uses_sanitized_baseline:
-            return None
+            return None, None
         return self._baseline_selection.select_for_publish(
             source=source,
             target=target,
@@ -444,7 +500,7 @@ class PublishRequestService:
             requested_by=command.requested_by,
         )
         self._readiness.assert_publish_ready(source)
-        selected_baseline = self._publish_source_resolution.resolve_for_publish(
+        selected_baseline, validation_report = self._publish_source_resolution.resolve_for_publish(
             source=source,
             target=target,
             profile=profile,
@@ -456,6 +512,18 @@ class PublishRequestService:
             source_id=source.source_id,
             sanitized_baseline_id=(
                 None if selected_baseline is None else selected_baseline.baseline_id
+            ),
+            baseline_validation_status=(
+                None if validation_report is None else validation_report.status
+            ),
+            baseline_validation_warning_count=(
+                0 if validation_report is None else validation_report.warning_count
+            ),
+            baseline_validation_error_count=(
+                0 if validation_report is None else validation_report.error_count
+            ),
+            baseline_validated_at=(
+                None if validation_report is None else validation_report.created_at
             ),
             target_environment_id=target.environment_id,
             dataset_profile_id=profile.profile_id,
@@ -475,6 +543,11 @@ class PublishRequestService:
                 details={
                     "sourceId": source.source_id,
                     "sanitizedBaselineId": job.sanitized_baseline_id,
+                    "baselineValidationStatus": (
+                        None
+                        if job.baseline_validation_status is None
+                        else job.baseline_validation_status.value
+                    ),
                     "targetEnvironmentId": target.environment_id,
                     "datasetProfileId": profile.profile_id,
                 },

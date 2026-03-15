@@ -63,3 +63,17 @@ class BaselineStatus(str, Enum):
     REFRESHING = "refreshing"
     FAILED = "failed"
     DEPRECATED = "deprecated"
+
+
+class ValidationStatus(str, Enum):
+    PASSED = "passed"
+    PASSED_WITH_WARNINGS = "passed_with_warnings"
+    FAILED = "failed"
+    PENDING = "pending"
+    NOT_VALIDATED = "not_validated"
+
+
+class ValidationSeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"

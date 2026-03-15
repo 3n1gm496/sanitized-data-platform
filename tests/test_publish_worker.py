@@ -77,6 +77,7 @@ def test_worker_processes_enqueued_job_to_completion():
     assert completed_job is not None
     assert completed_job.status.value == "completed"
     assert completed_job.sanitized_baseline_id == "baseline-crm-dev-v1"
+    assert completed_job.baseline_validation_status.value == "passed"
     assert completed_job.execution_summary["baselineId"] == "baseline-crm-dev-v1"
     assert completed_job.execution_summary["validationStatus"] == "pending-real-implementation"
     assert [event.event_type for event in audit_events] == [

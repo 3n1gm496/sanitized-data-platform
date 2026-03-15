@@ -15,6 +15,7 @@ from sanitized_data_platform.domain.entities import (
     System,
     TargetEnvironment,
     TransformationPolicy,
+    ValidationReport,
 )
 from sanitized_data_platform.domain.enums import MetadataObjectType
 
@@ -51,6 +52,10 @@ class DatasetProfileRepository(Protocol):
 class BaselineRepository(Protocol):
     def list_active_for_system(self, system_id: str) -> list[SanitizedBaseline]: ...
     def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None: ...
+
+
+class ValidationRepository(Protocol):
+    def get_latest_for_baseline(self, baseline_id: str) -> ValidationReport | None: ...
 
 
 class MetadataCatalogRepository(Protocol):

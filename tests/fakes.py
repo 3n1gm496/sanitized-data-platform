@@ -22,6 +22,8 @@ from sanitized_data_platform.domain.entities import (
     System,
     TargetEnvironment,
     TransformationPolicy,
+    ValidationCheckResult,
+    ValidationReport,
 )
 from sanitized_data_platform.domain.enums import (
     BaselineStatus,
@@ -30,6 +32,8 @@ from sanitized_data_platform.domain.enums import (
     EnvironmentType,
     MetadataObjectType,
     TransformationType,
+    ValidationSeverity,
+    ValidationStatus,
 )
 
 
@@ -114,6 +118,14 @@ class InMemoryBaselineRepository:
         ]
 
     def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None:
+        return self._items.get(baseline_id)
+
+
+class InMemoryValidationRepository:
+    def __init__(self, items: list[ValidationReport]) -> None:
+        self._items = {item.baseline_id: item for item in items}
+
+    def get_latest_for_baseline(self, baseline_id: str) -> ValidationReport | None:
         return self._items.get(baseline_id)
 
 
@@ -305,6 +317,52 @@ def sample_baseline() -> SanitizedBaseline:
     )
 
 
+def sample_validation_report(
+    *,
+    status: ValidationStatus = ValidationStatus.PASSED,
+) -> ValidationReport:
+    baseline = sample_baseline()
+    created_at = datetime(2026, 1, 1, 7, tzinfo=timezone.utc)
+    checks: tuple[ValidationCheckResult, ...]
+    if status == ValidationStatus.PASSED:
+        checks = (
+            ValidationCheckResult(
+                check_name="referential_integrity",
+                severity=ValidationSeverity.INFO,
+                passed=True,
+                message="All checks passed.",
+            ),
+        )
+    elif status == ValidationStatus.PASSED_WITH_WARNINGS:
+        checks = (
+            ValidationCheckResult(
+                check_name="row_count_variance",
+                severity=ValidationSeverity.WARNING,
+                passed=True,
+                message="Minor row count variance detected.",
+            ),
+        )
+    elif status == ValidationStatus.FAILED:
+        checks = (
+            ValidationCheckResult(
+                check_name="referential_integrity",
+                severity=ValidationSeverity.ERROR,
+                passed=False,
+                message="Foreign key violations detected.",
+            ),
+        )
+    else:
+        checks = ()
+
+    return ValidationReport(
+        report_id=f"validation-{baseline.baseline_id}",
+        baseline_id=baseline.baseline_id,
+        status=status,
+        checks=checks,
+        created_at=created_at,
+    )
+
+
 def sample_sensitivity_tags() -> list[SensitivityTag]:
     source = sample_source()
     return [
@@ -417,16 +475,28 @@ def build_policy_coverage_query_service(
 def build_publish_source_resolution_service(
     *,
     baselines: list[SanitizedBaseline] | None = None,
+    validation_reports: list[ValidationReport] | None = None,
 ):
     from sanitized_data_platform.application.services import (
         BaselineSelectionService,
+        BaselineValidationEligibilityService,
         PublishSourceResolutionService,
+        ValidationLookupService,
     )
 
     return PublishSourceResolutionService(
         BaselineSelectionService(
             InMemoryBaselineRepository(
                 [sample_baseline()] if baselines is None else baselines
+            ),
+            BaselineValidationEligibilityService(
+                ValidationLookupService(
+                    InMemoryValidationRepository(
+                        [sample_validation_report()]
+                        if validation_reports is None
+                        else validation_reports
+                    )
+                )
             )
         )
     )
