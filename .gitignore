@@ -1,0 +1,37 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+
+# Build / temp
+dist/
+build/
+coverage/
+tmp/
+temp/
+*.log
+
+# Secrets / env
+.env
+.env.*
+secrets/
+*.pem
+*.key
+
+# Local data
+data/
+artifacts/
