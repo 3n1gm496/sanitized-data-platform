@@ -1,0 +1,9 @@
+[project]
+name = "sanitized-data-platform"
+version = "0.1.0"
+description = "Technology-agnostic scaffolding for a sanitized data delivery platform."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
