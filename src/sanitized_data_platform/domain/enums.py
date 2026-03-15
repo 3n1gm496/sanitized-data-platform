@@ -41,3 +41,18 @@ class TransformationType(str, Enum):
     SYNTHETIC_REPLACEMENT = "synthetic_replacement"
     GENERALIZATION = "generalization"
     REDACTION = "redaction"
+
+
+class MetadataObjectType(str, Enum):
+    SCHEMA = "schema"
+    TABLE = "table"
+    COLUMN = "column"
+    RELATIONSHIP = "relationship"
+    INDEX = "index"
+    VIEW = "view"
+    SEQUENCE = "sequence"
+
+
+class PolicyCoverageSeverity(str, Enum):
+    BLOCKING = "blocking"
+    INFORMATIONAL = "informational"

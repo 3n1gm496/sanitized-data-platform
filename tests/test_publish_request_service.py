@@ -15,6 +15,7 @@ from tests.fakes import (
     InMemoryPublishJobRepository,
     InMemoryTargetEnvironmentRepository,
     SequentialIdGenerator,
+    build_readiness_service,
     sample_profile,
     sample_source,
     sample_target,
@@ -30,6 +31,7 @@ def build_service():
         audits=InMemoryAuditEventRepository(),
         queue=InMemoryJobQueue(),
         policy=AllowAllPolicy(),
+        readiness=build_readiness_service(),
         clock=FakeClock(),
         ids=SequentialIdGenerator(),
     )
@@ -69,6 +71,7 @@ def test_create_job_rejects_engine_mismatch():
         audits=InMemoryAuditEventRepository(),
         queue=InMemoryJobQueue(),
         policy=AllowAllPolicy(),
+        readiness=build_readiness_service(),
         clock=FakeClock(),
         ids=SequentialIdGenerator(),
     )

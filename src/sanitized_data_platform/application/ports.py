@@ -7,9 +7,14 @@ from sanitized_data_platform.domain.entities import (
     AuditEvent,
     DataSource,
     DatasetProfile,
+    MetadataObject,
     PublishJob,
+    Relationship,
+    SensitivityTag,
     TargetEnvironment,
+    TransformationPolicy,
 )
+from sanitized_data_platform.domain.enums import MetadataObjectType
 
 
 class ClockPort(Protocol):
@@ -33,6 +38,24 @@ class TargetEnvironmentRepository(Protocol):
 class DatasetProfileRepository(Protocol):
     def list_active(self) -> list[DatasetProfile]: ...
     def get_by_id(self, profile_id: str) -> DatasetProfile | None: ...
+
+
+class MetadataCatalogRepository(Protocol):
+    def list_objects(
+        self,
+        source_id: str,
+        *,
+        object_type: MetadataObjectType | None = None,
+    ) -> list[MetadataObject]: ...
+    def list_relationships(self, source_id: str) -> list[Relationship]: ...
+
+
+class TransformationPolicyRepository(Protocol):
+    def list_active_for_system(self, system_name: str) -> list[TransformationPolicy]: ...
+
+
+class ClassificationRepository(Protocol):
+    def list_sensitivity_tags(self, source_id: str) -> list[SensitivityTag]: ...
 
 
 class PublishJobRepository(Protocol):

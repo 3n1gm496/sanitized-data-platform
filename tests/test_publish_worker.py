@@ -13,6 +13,7 @@ from tests.fakes import (
     InMemoryTargetEnvironmentRepository,
     SequentialIdGenerator,
     StubPublishPipeline,
+    build_readiness_service,
     sample_profile,
     sample_source,
     sample_target,
@@ -37,6 +38,7 @@ def test_worker_processes_enqueued_job_to_completion():
         audits=audit_repo,
         queue=queue,
         policy=AllowAllPolicy(),
+        readiness=build_readiness_service(clock=clock),
         clock=clock,
         ids=ids,
     )

@@ -15,6 +15,7 @@ from tests.fakes import (
     InMemoryPublishJobRepository,
     InMemoryTargetEnvironmentRepository,
     SequentialIdGenerator,
+    build_readiness_service,
     sample_profile,
     sample_source,
     sample_target,
@@ -40,6 +41,7 @@ def build_api() -> ApiApp:
         audits=audit_repo,
         queue=queue,
         policy=AllowAllPolicy(),
+        readiness=build_readiness_service(clock=clock),
         clock=clock,
         ids=ids,
     )

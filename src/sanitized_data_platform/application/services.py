@@ -1,20 +1,33 @@
 from __future__ import annotations
 
-from sanitized_data_platform.domain.entities import AuditEvent, PublishJob
+from sanitized_data_platform.domain.entities import (
+    AuditEvent,
+    DataSource,
+    PolicyCoverageGap,
+    PolicyCoverageReport,
+    PublishJob,
+)
 from sanitized_data_platform.domain.errors import DomainError
-from sanitized_data_platform.domain.enums import JobStatus
+from sanitized_data_platform.domain.enums import (
+    JobStatus,
+    MetadataObjectType,
+    PolicyCoverageSeverity,
+)
 
 from .dto import CreatePublishJobCommand, JobView, SystemSummary
 from .ports import (
     AuditEventRepository,
+    ClassificationRepository,
     ClockPort,
     DataSourceRepository,
     DatasetProfileRepository,
     IdGeneratorPort,
     JobQueuePort,
+    MetadataCatalogRepository,
     PolicyPort,
     PublishJobRepository,
     TargetEnvironmentRepository,
+    TransformationPolicyRepository,
 )
 
 
@@ -87,6 +100,93 @@ class CatalogQueryService:
         return filtered
 
 
+class PolicyCoverageEvaluationService:
+    def __init__(
+        self,
+        *,
+        metadata_catalog: MetadataCatalogRepository,
+        policies: TransformationPolicyRepository,
+        classifications: ClassificationRepository,
+        clock: ClockPort,
+    ) -> None:
+        self._metadata_catalog = metadata_catalog
+        self._policies = policies
+        self._classifications = classifications
+        self._clock = clock
+
+    def evaluate_for_source(self, source: DataSource) -> PolicyCoverageReport:
+        columns = [
+            item
+            for item in self._metadata_catalog.list_objects(
+                source.source_id,
+                object_type=MetadataObjectType.COLUMN,
+            )
+            if item.active
+        ]
+        tags_by_object_id: dict[str, list] = {}
+        for tag in self._classifications.list_sensitivity_tags(source.source_id):
+            if not tag.active or not tag.approved:
+                continue
+            tags_by_object_id.setdefault(tag.object_id, []).append(tag)
+
+        policies = self._policies.list_active_for_system(source.system_name)
+        gaps: list[PolicyCoverageGap] = []
+        covered_object_count = 0
+
+        for column in columns:
+            tags = tags_by_object_id.get(column.object_id, [])
+            if not tags:
+                gaps.append(
+                    PolicyCoverageGap(
+                        gap_type="missing_classification",
+                        metadata_object_id=column.object_id,
+                        object_name=column.qualified_name,
+                        message="Column has no approved sensitivity classification yet.",
+                        severity=PolicyCoverageSeverity.INFORMATIONAL,
+                    )
+                )
+                continue
+
+            if any(policy.active and policy.applies_to(column, tags) for policy in policies):
+                covered_object_count += 1
+                continue
+
+            gaps.append(
+                PolicyCoverageGap(
+                    gap_type="missing_transformation_policy",
+                    metadata_object_id=column.object_id,
+                    object_name=column.qualified_name,
+                    message="Sensitive column has no matching transformation policy.",
+                    severity=PolicyCoverageSeverity.BLOCKING,
+                    sensitivity_tags=tuple(tag.tag_name for tag in tags),
+                )
+            )
+
+        return PolicyCoverageReport(
+            source_id=source.source_id,
+            system_name=source.system_name,
+            evaluated_object_count=len(columns),
+            covered_object_count=covered_object_count,
+            gaps=tuple(gaps),
+            evaluated_at=self._clock.now(),
+        )
+
+
+class PublishReadinessValidationService:
+    def __init__(self, coverage: PolicyCoverageEvaluationService) -> None:
+        self._coverage = coverage
+
+    def assert_publish_ready(self, source: DataSource) -> PolicyCoverageReport:
+        report = self._coverage.evaluate_for_source(source)
+        if report.blocking_gaps:
+            object_names = ", ".join(gap.object_name for gap in report.blocking_gaps[:3])
+            raise DomainError(
+                "Publish readiness failed because blocking policy coverage gaps exist"
+                f" for: {object_names}."
+            )
+        return report
+
+
 class PublishRequestService:
     def __init__(
         self,
@@ -98,6 +198,7 @@ class PublishRequestService:
         audits: AuditEventRepository,
         queue: JobQueuePort,
         policy: PolicyPort,
+        readiness: PublishReadinessValidationService,
         clock: ClockPort,
         ids: IdGeneratorPort,
     ) -> None:
@@ -108,6 +209,7 @@ class PublishRequestService:
         self._audits = audits
         self._queue = queue
         self._policy = policy
+        self._readiness = readiness
         self._clock = clock
         self._ids = ids
 
@@ -133,6 +235,7 @@ class PublishRequestService:
             profile=profile,
             requested_by=command.requested_by,
         )
+        self._readiness.assert_publish_ready(source)
 
         now = self._clock.now()
         job = PublishJob.create(

@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from sanitized_data_platform.application.services import (
+    PolicyCoverageEvaluationService,
+    PublishReadinessValidationService,
+)
 from sanitized_data_platform.domain.entities import (
     AuditEvent,
     DataSource,
     DatasetProfile,
+    MetadataObject,
     PublishJob,
+    Relationship,
+    SensitivityTag,
     TargetEnvironment,
+    TransformationPolicy,
 )
 from sanitized_data_platform.domain.enums import (
     DatabaseEngine,
     DatasetMode,
     EnvironmentType,
+    MetadataObjectType,
+    TransformationType,
 )
 
 
@@ -68,6 +77,45 @@ class InMemoryDatasetProfileRepository:
 
     def get_by_id(self, profile_id: str) -> DatasetProfile | None:
         return self._items.get(profile_id)
+
+
+class InMemoryMetadataCatalogRepository:
+    def __init__(
+        self,
+        objects: list[MetadataObject],
+        relationships: list[Relationship] | None = None,
+    ) -> None:
+        self._objects = list(objects)
+        self._relationships = list(relationships or [])
+
+    def list_objects(self, source_id: str, *, object_type=None) -> list[MetadataObject]:
+        items = [item for item in self._objects if item.source_id == source_id]
+        if object_type is not None:
+            items = [item for item in items if item.object_type == object_type]
+        return items
+
+    def list_relationships(self, source_id: str) -> list[Relationship]:
+        return [item for item in self._relationships if item.source_id == source_id]
+
+
+class InMemoryTransformationPolicyRepository:
+    def __init__(self, items: list[TransformationPolicy]) -> None:
+        self._items = list(items)
+
+    def list_active_for_system(self, system_name: str) -> list[TransformationPolicy]:
+        return [
+            item
+            for item in self._items
+            if item.system_name == system_name and item.active
+        ]
+
+
+class InMemoryClassificationRepository:
+    def __init__(self, tags: list[SensitivityTag]) -> None:
+        self._tags = list(tags)
+
+    def list_sensitivity_tags(self, source_id: str) -> list[SensitivityTag]:
+        return [tag for tag in self._tags if tag.source_id == source_id]
 
 
 class InMemoryPublishJobRepository:
@@ -150,3 +198,93 @@ def sample_profile() -> DatasetProfile:
         dataset_mode=DatasetMode.FULL_CLONE,
         target_environment_type=EnvironmentType.DEV,
     )
+
+
+def sample_metadata_objects() -> list[MetadataObject]:
+    source = sample_source()
+    return [
+        MetadataObject(
+            object_id="table-customers",
+            source_id=source.source_id,
+            system_name=source.system_name,
+            object_type=MetadataObjectType.TABLE,
+            name="customers",
+            qualified_name="crm.customers",
+        ),
+        MetadataObject(
+            object_id="column-customers-email",
+            source_id=source.source_id,
+            system_name=source.system_name,
+            object_type=MetadataObjectType.COLUMN,
+            name="email",
+            qualified_name="crm.customers.email",
+            container_name="crm.customers",
+            parent_object_id="table-customers",
+            logical_data_type="string",
+        ),
+        MetadataObject(
+            object_id="column-customers-status",
+            source_id=source.source_id,
+            system_name=source.system_name,
+            object_type=MetadataObjectType.COLUMN,
+            name="status",
+            qualified_name="crm.customers.status",
+            container_name="crm.customers",
+            parent_object_id="table-customers",
+            logical_data_type="string",
+        ),
+    ]
+
+
+def sample_sensitivity_tags() -> list[SensitivityTag]:
+    source = sample_source()
+    return [
+        SensitivityTag(
+            tag_id="tag-email",
+            source_id=source.source_id,
+            object_id="column-customers-email",
+            tag_name="pii.email",
+            assigned_by="manual-review",
+        )
+    ]
+
+
+def sample_transformation_policies() -> list[TransformationPolicy]:
+    source = sample_source()
+    return [
+        TransformationPolicy(
+            policy_id="policy-customers-email",
+            system_name=source.system_name,
+            object_name="crm.customers",
+            column_name="email",
+            sensitivity_tag="pii.email",
+            transformation_type=TransformationType.DETERMINISTIC_PSEUDONYMIZATION,
+        )
+    ]
+
+
+def build_readiness_service(
+    *,
+    metadata_objects: list[MetadataObject] | None = None,
+    relationships: list[Relationship] | None = None,
+    sensitivity_tags: list[SensitivityTag] | None = None,
+    transformation_policies: list[TransformationPolicy] | None = None,
+    clock: FakeClock | None = None,
+) -> PublishReadinessValidationService:
+    service_clock = clock or FakeClock()
+    coverage = PolicyCoverageEvaluationService(
+        metadata_catalog=InMemoryMetadataCatalogRepository(
+            sample_metadata_objects() if metadata_objects is None else metadata_objects,
+            [] if relationships is None else relationships,
+        ),
+        policies=InMemoryTransformationPolicyRepository(
+            sample_transformation_policies()
+            if transformation_policies is None
+            else transformation_policies
+        ),
+        classifications=InMemoryClassificationRepository(
+            sample_sensitivity_tags() if sensitivity_tags is None else sensitivity_tags
+        ),
+        clock=service_clock,
+    )
+    return PublishReadinessValidationService(coverage)

@@ -9,6 +9,8 @@ from .enums import (
     DatasetMode,
     EnvironmentType,
     JobStatus,
+    MetadataObjectType,
+    PolicyCoverageSeverity,
     TransformationType,
 )
 from .errors import DomainError
@@ -54,6 +56,47 @@ class DatasetProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class MetadataObject:
+    object_id: str
+    source_id: str
+    system_name: str
+    object_type: MetadataObjectType
+    name: str
+    qualified_name: str
+    container_name: str | None = None
+    parent_object_id: str | None = None
+    logical_data_type: str | None = None
+    active: bool = True
+
+    @property
+    def is_column(self) -> bool:
+        return self.object_type == MetadataObjectType.COLUMN
+
+
+@dataclass(frozen=True, slots=True)
+class Relationship:
+    relationship_id: str
+    source_id: str
+    source_object_id: str
+    target_object_id: str
+    relationship_type: str
+    inferred: bool = False
+    confidence: float | None = None
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SensitivityTag:
+    tag_id: str
+    source_id: str
+    object_id: str
+    tag_name: str
+    assigned_by: str
+    approved: bool = True
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class TransformationPolicy:
     policy_id: str
     system_name: str
@@ -72,6 +115,53 @@ class TransformationPolicy:
             raise DomainError(
                 "Reversible transformation policies require a tokenization domain."
             )
+
+    def applies_to(self, metadata_object: MetadataObject, tags: list[SensitivityTag]) -> bool:
+        if not metadata_object.is_column:
+            return False
+        if self.system_name != metadata_object.system_name:
+            return False
+        if self.object_name != metadata_object.container_name:
+            return False
+        if self.column_name != metadata_object.name:
+            return False
+        return any(tag.tag_name == self.sensitivity_tag for tag in tags)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyCoverageGap:
+    gap_type: str
+    metadata_object_id: str
+    object_name: str
+    message: str
+    severity: PolicyCoverageSeverity
+    sensitivity_tags: tuple[str, ...] = ()
+
+    @property
+    def blocking(self) -> bool:
+        return self.severity == PolicyCoverageSeverity.BLOCKING
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyCoverageReport:
+    source_id: str
+    system_name: str
+    evaluated_object_count: int
+    covered_object_count: int
+    gaps: tuple[PolicyCoverageGap, ...]
+    evaluated_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def blocking_gaps(self) -> tuple[PolicyCoverageGap, ...]:
+        return tuple(gap for gap in self.gaps if gap.blocking)
+
+    @property
+    def informational_gaps(self) -> tuple[PolicyCoverageGap, ...]:
+        return tuple(gap for gap in self.gaps if not gap.blocking)
+
+    @property
+    def is_publish_ready(self) -> bool:
+        return not self.blocking_gaps
 
 
 @dataclass(frozen=True, slots=True)
