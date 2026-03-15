@@ -11,6 +11,7 @@ from sanitized_data_platform.domain.entities import (
     PublishJob,
     Relationship,
     SensitivityTag,
+    System,
     TargetEnvironment,
     TransformationPolicy,
 )
@@ -25,9 +26,15 @@ class IdGeneratorPort(Protocol):
     def new_id(self, prefix: str) -> str: ...
 
 
+class SystemRepository(Protocol):
+    def list_active(self) -> list[System]: ...
+    def get_by_id(self, system_id: str) -> System | None: ...
+
+
 class DataSourceRepository(Protocol):
     def list_active(self) -> list[DataSource]: ...
     def get_by_id(self, source_id: str) -> DataSource | None: ...
+    def get_active_by_system_id(self, system_id: str) -> DataSource | None: ...
 
 
 class TargetEnvironmentRepository(Protocol):
@@ -51,7 +58,7 @@ class MetadataCatalogRepository(Protocol):
 
 
 class TransformationPolicyRepository(Protocol):
-    def list_active_for_system(self, system_name: str) -> list[TransformationPolicy]: ...
+    def list_active_for_system(self, system_id: str) -> list[TransformationPolicy]: ...
 
 
 class ClassificationRepository(Protocol):

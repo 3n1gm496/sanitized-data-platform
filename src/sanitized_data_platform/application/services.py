@@ -34,6 +34,7 @@ from .ports import (
     MetadataCatalogRepository,
     PolicyPort,
     PublishJobRepository,
+    SystemRepository,
     TargetEnvironmentRepository,
     TransformationPolicyRepository,
 )
@@ -42,10 +43,12 @@ from .ports import (
 class CatalogQueryService:
     def __init__(
         self,
+        systems: SystemRepository,
         data_sources: DataSourceRepository,
         environments: TargetEnvironmentRepository,
         dataset_profiles: DatasetProfileRepository,
     ) -> None:
+        self._systems = systems
         self._data_sources = data_sources
         self._environments = environments
         self._dataset_profiles = dataset_profiles
@@ -54,16 +57,19 @@ class CatalogQueryService:
         active_profiles = self._dataset_profiles.list_active()
         summaries: list[SystemSummary] = []
 
-        for source in self._data_sources.list_active():
+        for system in self._systems.list_active():
+            source = self._data_sources.get_active_by_system_id(system.system_id)
+            if source is None:
+                continue
             profile_count = sum(
                 1
                 for profile in active_profiles
-                if profile.system_name == source.system_name
+                if profile.system_id == system.system_id
             )
             summaries.append(
                 SystemSummary(
-                    system_id=source.system_name.lower(),
-                    name=source.system_name,
+                    system_id=system.system_id,
+                    name=system.name,
                     source_engine=source.engine_type,
                     available_profiles=profile_count,
                 )
@@ -96,7 +102,7 @@ class CatalogQueryService:
 
         filtered = []
         for profile in profiles:
-            if source is not None and profile.system_name != source.system_name:
+            if source is not None and profile.system_id != source.system_id:
                 continue
             if (
                 target is not None
@@ -108,37 +114,57 @@ class CatalogQueryService:
         return filtered
 
 
-def resolve_active_source_by_system_id(
+def resolve_active_source_for_system(
+    systems: SystemRepository,
     data_sources: DataSourceRepository,
     system_id: str,
 ) -> DataSource:
-    normalized_system_id = system_id.strip().lower()
-    for source in data_sources.list_active():
-        if source.system_name.lower() == normalized_system_id:
-            return source
-    raise DomainError(f"Unknown system: {system_id}")
+    system = systems.get_by_id(system_id)
+    if system is None or not system.active:
+        raise DomainError(f"Unknown system: {system_id}")
+    source = data_sources.get_active_by_system_id(system_id)
+    if source is not None:
+        return source
+    raise DomainError(f"No active source configured for system: {system_id}")
+
+
+def resolve_active_system(
+    systems: SystemRepository,
+    system_id: str,
+):
+    system = systems.get_by_id(system_id)
+    if system is None or not system.active:
+        raise DomainError(f"Unknown system: {system_id}")
+    return system
 
 
 class MetadataQueryService:
     def __init__(
         self,
         *,
+        systems: SystemRepository,
         data_sources: DataSourceRepository,
         metadata_catalog: MetadataCatalogRepository,
     ) -> None:
+        self._systems = systems
         self._data_sources = data_sources
         self._metadata_catalog = metadata_catalog
 
     def list_metadata_objects(self, system_id: str) -> MetadataCatalogView:
-        source = resolve_active_source_by_system_id(self._data_sources, system_id)
+        system = resolve_active_system(self._systems, system_id)
+        source = resolve_active_source_for_system(
+            self._systems,
+            self._data_sources,
+            system_id,
+        )
         objects = [
             MetadataObjectView.from_metadata_object(item)
             for item in self._metadata_catalog.list_objects(source.source_id)
             if item.active
         ]
         return MetadataCatalogView(
-            system_id=source.system_name.lower(),
-            system_name=source.system_name,
+            system_id=source.system_id,
+            system_name=system.name,
             source_id=source.source_id,
             items=objects,
         )
@@ -148,9 +174,11 @@ class PolicyQueryService:
     def __init__(
         self,
         *,
+        systems: SystemRepository,
         data_sources: DataSourceRepository,
         policies: TransformationPolicyRepository,
     ) -> None:
+        self._systems = systems
         self._data_sources = data_sources
         self._policies = policies
 
@@ -172,16 +200,12 @@ class PolicyQueryService:
         }
 
         if system_id is None:
-            source_by_name = {
-                source.system_name: source
-                for source in self._data_sources.list_active()
-            }
             policies = []
-            for system_name in sorted(source_by_name):
-                policies.extend(self._policies.list_active_for_system(system_name))
+            for system in self._systems.list_active():
+                policies.extend(self._policies.list_active_for_system(system.system_id))
         else:
-            source = resolve_active_source_by_system_id(self._data_sources, system_id)
-            policies = self._policies.list_active_for_system(source.system_name)
+            resolve_active_system(self._systems, system_id)
+            policies = self._policies.list_active_for_system(system_id)
 
         if object_name is not None:
             policies = [policy for policy in policies if policy.object_name == object_name]
@@ -223,7 +247,7 @@ class PolicyCoverageEvaluationService:
                 continue
             tags_by_object_id.setdefault(tag.object_id, []).append(tag)
 
-        policies = self._policies.list_active_for_system(source.system_name)
+        policies = self._policies.list_active_for_system(source.system_id)
         gaps: list[PolicyCoverageGap] = []
         covered_object_count = 0
 
@@ -258,6 +282,7 @@ class PolicyCoverageEvaluationService:
 
         return PolicyCoverageReport(
             source_id=source.source_id,
+            system_id=source.system_id,
             system_name=source.system_name,
             evaluated_object_count=len(columns),
             covered_object_count=covered_object_count,
@@ -285,14 +310,21 @@ class PolicyCoverageQueryService:
     def __init__(
         self,
         *,
+        systems: SystemRepository,
         data_sources: DataSourceRepository,
         coverage: PolicyCoverageEvaluationService,
     ) -> None:
+        self._systems = systems
         self._data_sources = data_sources
         self._coverage = coverage
 
     def get_policy_coverage(self, system_id: str) -> PolicyCoverageReportView:
-        source = resolve_active_source_by_system_id(self._data_sources, system_id)
+        resolve_active_system(self._systems, system_id)
+        source = resolve_active_source_for_system(
+            self._systems,
+            self._data_sources,
+            system_id,
+        )
         report = self._coverage.evaluate_for_source(source)
         return PolicyCoverageReportView.from_report(report)
 
@@ -328,7 +360,7 @@ class PublishRequestService:
         target = self._require_active_target(command.target_environment_id)
         profile = self._require_active_profile(command.dataset_profile_id)
 
-        if profile.system_name != source.system_name:
+        if profile.system_id != source.system_id:
             raise DomainError("Dataset profile does not belong to the selected system.")
         if profile.target_environment_type != target.environment_type:
             raise DomainError(

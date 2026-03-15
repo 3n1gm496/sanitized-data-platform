@@ -102,7 +102,7 @@ class TransformationPolicyView:
     def from_policy(cls, policy: TransformationPolicy) -> "TransformationPolicyView":
         return cls(
             policy_id=policy.policy_id,
-            system_id=policy.system_name.lower(),
+            system_id=policy.system_id,
             system_name=policy.system_name,
             object_name=policy.object_name,
             column_name=policy.column_name,
@@ -153,7 +153,7 @@ class PolicyCoverageReportView:
     @classmethod
     def from_report(cls, report: PolicyCoverageReport) -> "PolicyCoverageReportView":
         return cls(
-            system_id=report.system_name.lower(),
+            system_id=report.system_id,
             system_name=report.system_name,
             source_id=report.source_id,
             publish_ready=report.is_publish_ready,

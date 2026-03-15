@@ -19,6 +19,7 @@ from tests.fakes import (
     InMemoryJobQueue,
     InMemoryMetadataCatalogRepository,
     InMemoryPublishJobRepository,
+    InMemorySystemRepository,
     InMemoryTargetEnvironmentRepository,
     InMemoryTransformationPolicyRepository,
     SequentialIdGenerator,
@@ -27,6 +28,7 @@ from tests.fakes import (
     sample_profile,
     sample_sensitivity_tags,
     sample_source,
+    sample_system,
     sample_target,
     sample_transformation_policies,
 )
@@ -34,6 +36,7 @@ from tests.fakes import (
 
 def build_api() -> ApiApp:
     source_repo = InMemoryDataSourceRepository([sample_source()])
+    system_repo = InMemorySystemRepository([sample_system()])
     target_repo = InMemoryTargetEnvironmentRepository([sample_target()])
     profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
     job_repo = InMemoryPublishJobRepository()
@@ -42,7 +45,7 @@ def build_api() -> ApiApp:
     clock = FakeClock()
     ids = SequentialIdGenerator()
 
-    catalog = CatalogQueryService(source_repo, target_repo, profile_repo)
+    catalog = CatalogQueryService(system_repo, source_repo, target_repo, profile_repo)
     coverage = PolicyCoverageEvaluationService(
         metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
         policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
@@ -63,14 +66,17 @@ def build_api() -> ApiApp:
     )
     monitoring = JobMonitoringService(job_repo, audit_repo)
     metadata_queries = MetadataQueryService(
+        systems=system_repo,
         data_sources=source_repo,
         metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
     )
     policy_queries = PolicyQueryService(
+        systems=system_repo,
         data_sources=source_repo,
         policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
     )
     policy_coverage_queries = PolicyCoverageQueryService(
+        systems=system_repo,
         data_sources=source_repo,
         coverage=coverage,
     )

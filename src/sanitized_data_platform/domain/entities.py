@@ -21,8 +21,16 @@ def utc_now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
+class System:
+    system_id: str
+    name: str
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class DataSource:
     source_id: str
+    system_id: str
     system_name: str
     engine_type: DatabaseEngine
     endpoint: str
@@ -45,6 +53,7 @@ class TargetEnvironment:
 @dataclass(frozen=True, slots=True)
 class DatasetProfile:
     profile_id: str
+    system_id: str
     name: str
     system_name: str
     dataset_mode: DatasetMode
@@ -59,6 +68,7 @@ class DatasetProfile:
 class MetadataObject:
     object_id: str
     source_id: str
+    system_id: str
     system_name: str
     object_type: MetadataObjectType
     name: str
@@ -99,6 +109,7 @@ class SensitivityTag:
 @dataclass(frozen=True, slots=True)
 class TransformationPolicy:
     policy_id: str
+    system_id: str
     system_name: str
     object_name: str
     column_name: str
@@ -119,7 +130,7 @@ class TransformationPolicy:
     def applies_to(self, metadata_object: MetadataObject, tags: list[SensitivityTag]) -> bool:
         if not metadata_object.is_column:
             return False
-        if self.system_name != metadata_object.system_name:
+        if self.system_id != metadata_object.system_id:
             return False
         if self.object_name != metadata_object.container_name:
             return False
@@ -145,6 +156,7 @@ class PolicyCoverageGap:
 @dataclass(frozen=True, slots=True)
 class PolicyCoverageReport:
     source_id: str
+    system_id: str
     system_name: str
     evaluated_object_count: int
     covered_object_count: int

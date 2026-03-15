@@ -18,6 +18,7 @@ from sanitized_data_platform.domain.entities import (
     PublishJob,
     Relationship,
     SensitivityTag,
+    System,
     TargetEnvironment,
     TransformationPolicy,
 )
@@ -49,6 +50,17 @@ class SequentialIdGenerator:
         return f"{prefix}-{self._counters[prefix]}"
 
 
+class InMemorySystemRepository:
+    def __init__(self, items: list[System]) -> None:
+        self._items = {item.system_id: item for item in items}
+
+    def list_active(self) -> list[System]:
+        return [item for item in self._items.values() if item.active]
+
+    def get_by_id(self, system_id: str) -> System | None:
+        return self._items.get(system_id)
+
+
 class InMemoryDataSourceRepository:
     def __init__(self, items: list[DataSource]) -> None:
         self._items = {item.source_id: item for item in items}
@@ -58,6 +70,12 @@ class InMemoryDataSourceRepository:
 
     def get_by_id(self, source_id: str) -> DataSource | None:
         return self._items.get(source_id)
+
+    def get_active_by_system_id(self, system_id: str) -> DataSource | None:
+        for item in self._items.values():
+            if item.system_id == system_id and item.active:
+                return item
+        return None
 
 
 class InMemoryTargetEnvironmentRepository:
@@ -105,11 +123,11 @@ class InMemoryTransformationPolicyRepository:
     def __init__(self, items: list[TransformationPolicy]) -> None:
         self._items = list(items)
 
-    def list_active_for_system(self, system_name: str) -> list[TransformationPolicy]:
+    def list_active_for_system(self, system_id: str) -> list[TransformationPolicy]:
         return [
             item
             for item in self._items
-            if item.system_name == system_name and item.active
+            if item.system_id == system_id and item.active
         ]
 
 
@@ -176,11 +194,16 @@ class StubPublishPipeline:
 def sample_source() -> DataSource:
     return DataSource(
         source_id="source-crm-replica",
+        system_id="crm",
         system_name="CRM",
         engine_type=DatabaseEngine.POSTGRES,
         endpoint="postgresql://crm-replica.local",
         database_name="crm",
     )
+
+
+def sample_system() -> System:
+    return System(system_id="crm", name="CRM")
 
 
 def sample_target() -> TargetEnvironment:
@@ -196,6 +219,7 @@ def sample_target() -> TargetEnvironment:
 def sample_profile() -> DatasetProfile:
     return DatasetProfile(
         profile_id="profile-full-sanitized",
+        system_id="crm",
         name="full_sanitized_clone",
         system_name="CRM",
         dataset_mode=DatasetMode.FULL_CLONE,
@@ -209,6 +233,7 @@ def sample_metadata_objects() -> list[MetadataObject]:
         MetadataObject(
             object_id="table-customers",
             source_id=source.source_id,
+            system_id=source.system_id,
             system_name=source.system_name,
             object_type=MetadataObjectType.TABLE,
             name="customers",
@@ -217,6 +242,7 @@ def sample_metadata_objects() -> list[MetadataObject]:
         MetadataObject(
             object_id="column-customers-email",
             source_id=source.source_id,
+            system_id=source.system_id,
             system_name=source.system_name,
             object_type=MetadataObjectType.COLUMN,
             name="email",
@@ -228,6 +254,7 @@ def sample_metadata_objects() -> list[MetadataObject]:
         MetadataObject(
             object_id="column-customers-status",
             source_id=source.source_id,
+            system_id=source.system_id,
             system_name=source.system_name,
             object_type=MetadataObjectType.COLUMN,
             name="status",
@@ -257,6 +284,7 @@ def sample_transformation_policies() -> list[TransformationPolicy]:
     return [
         TransformationPolicy(
             policy_id="policy-customers-email",
+            system_id=source.system_id,
             system_name=source.system_name,
             object_name="crm.customers",
             column_name="email",
@@ -321,6 +349,7 @@ def build_coverage_evaluation_service(
 
 def build_metadata_query_service() -> MetadataQueryService:
     return MetadataQueryService(
+        systems=InMemorySystemRepository([sample_system()]),
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
     )
@@ -328,6 +357,7 @@ def build_metadata_query_service() -> MetadataQueryService:
 
 def build_policy_query_service() -> PolicyQueryService:
     return PolicyQueryService(
+        systems=InMemorySystemRepository([sample_system()]),
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
     )
@@ -339,6 +369,7 @@ def build_policy_coverage_query_service(
 ) -> PolicyCoverageQueryService:
     coverage_clock = clock or FakeClock()
     return PolicyCoverageQueryService(
+        systems=InMemorySystemRepository([sample_system()]),
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         coverage=build_coverage_evaluation_service(clock=coverage_clock),
     )
