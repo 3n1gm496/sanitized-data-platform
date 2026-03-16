@@ -10,8 +10,10 @@ from tests.fakes import (
     InMemoryDataSourceRepository,
     InMemoryDatasetProfileRepository,
     InMemoryJobQueue,
+    InMemoryLineageRepository,
     InMemoryPublishJobRepository,
     InMemoryTargetEnvironmentRepository,
+    InMemoryValidationRepository,
     SequentialIdGenerator,
     StubPublishPipeline,
     build_publish_source_resolution_service,
@@ -20,6 +22,7 @@ from tests.fakes import (
     sample_profile,
     sample_source,
     sample_target,
+    sample_validation_report,
 )
 
 
@@ -30,6 +33,7 @@ def test_worker_processes_enqueued_job_to_completion():
     baseline_repo = InMemoryBaselineRepository([sample_baseline()])
     job_repo = InMemoryPublishJobRepository()
     audit_repo = InMemoryAuditEventRepository()
+    lineage_repo = InMemoryLineageRepository()
     queue = InMemoryJobQueue()
     clock = FakeClock()
     ids = SequentialIdGenerator()
@@ -65,6 +69,8 @@ def test_worker_processes_enqueued_job_to_completion():
         dataset_profiles=profile_repo,
         pipeline=StubPublishPipeline(),
         audits=audit_repo,
+        lineage=lineage_repo,
+        validations=InMemoryValidationRepository([sample_validation_report()]),
         clock=clock,
         ids=ids,
     )
@@ -72,6 +78,10 @@ def test_worker_processes_enqueued_job_to_completion():
     processed_job_id = worker.process_next_job()
     completed_job = job_repo.get_by_id(created.job_id)
     audit_events = audit_repo.list_for_subject(created.job_id)
+    lineage_records = lineage_repo.list_related(
+        reference_type="publish_job",
+        reference_id=created.job_id,
+    )
 
     assert processed_job_id == created.job_id
     assert completed_job is not None
@@ -80,6 +90,10 @@ def test_worker_processes_enqueued_job_to_completion():
     assert completed_job.baseline_validation_status.value == "passed"
     assert completed_job.execution_summary["baselineId"] == "baseline-crm-dev-v1"
     assert completed_job.execution_summary["validationStatus"] == "pending-real-implementation"
+    assert [record.event_type for record in lineage_records] == [
+        "baseline_published",
+        "publish_used_validated_baseline",
+    ]
     assert [event.event_type for event in audit_events] == [
         "publish_job_requested",
         "publish_job_started",

@@ -58,6 +58,12 @@ class PolicyCoverageSeverity(str, Enum):
     INFORMATIONAL = "informational"
 
 
+class ClassificationStatus(str, Enum):
+    SENSITIVE = "sensitive"
+    NON_SENSITIVE = "non_sensitive"
+    NEEDS_REVIEW = "needs_review"
+
+
 class BaselineStatus(str, Enum):
     ACTIVE = "active"
     REFRESHING = "refreshing"
@@ -77,3 +83,40 @@ class ValidationSeverity(str, Enum):
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
+
+
+class BaselineRefreshStatus(str, Enum):
+    REQUESTED = "requested"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class RefreshScheduleStatus(str, Enum):
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class ExtractionJobStatus(str, Enum):
+    REQUESTED = "requested"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ExtractionArtifactKind(str, Enum):
+    SAMPLE = "sample"
+    FULL = "full"
+
+
+class ExtractionArtifactFormat(str, Enum):
+    JSONL = "jsonl"
+    CSV = "csv"
+
+
+class ExtractionArtifactStatus(str, Enum):
+    AVAILABLE = "available"
+    EXPIRED = "expired"
+    DELETED = "deleted"

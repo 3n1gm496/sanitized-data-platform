@@ -4,16 +4,26 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from sanitized_data_platform.application.services import (
+    BaselineEligibilityExplanationService,
+    BaselineQueryService,
     MetadataQueryService,
     PolicyCoverageEvaluationService,
     PolicyCoverageQueryService,
     PolicyQueryService,
+    PublishValidationSummaryService,
     PublishReadinessValidationService,
+    ValidationLookupService,
 )
 from sanitized_data_platform.domain.entities import (
     AuditEvent,
+    BaselineRefreshJob,
+    BaselineRefreshSchedule,
     DataSource,
     DatasetProfile,
+    ExtractionArtifact,
+    ExtractionJob,
+    ExtractionPlanSnapshot,
+    LineageRecord,
     MetadataObject,
     PublishJob,
     Relationship,
@@ -27,10 +37,13 @@ from sanitized_data_platform.domain.entities import (
 )
 from sanitized_data_platform.domain.enums import (
     BaselineStatus,
+    BaselineRefreshStatus,
+    ClassificationStatus,
     DatabaseEngine,
     DatasetMode,
     EnvironmentType,
     MetadataObjectType,
+    RefreshScheduleStatus,
     TransformationType,
     ValidationSeverity,
     ValidationStatus,
@@ -117,8 +130,17 @@ class InMemoryBaselineRepository:
             if item.system_id == system_id and item.active
         ]
 
+    def list_for_system(self, system_id: str) -> list[SanitizedBaseline]:
+        return [item for item in self._items.values() if item.system_id == system_id]
+
     def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None:
         return self._items.get(baseline_id)
+
+    def add(self, baseline: SanitizedBaseline) -> None:
+        self._items[baseline.baseline_id] = baseline
+
+    def save(self, baseline: SanitizedBaseline) -> None:
+        self._items[baseline.baseline_id] = baseline
 
 
 class InMemoryValidationRepository:
@@ -135,17 +157,31 @@ class InMemoryMetadataCatalogRepository:
         objects: list[MetadataObject],
         relationships: list[Relationship] | None = None,
     ) -> None:
-        self._objects = list(objects)
-        self._relationships = list(relationships or [])
+        self._objects = {item.object_id: item for item in objects}
+        self._relationships = {
+            item.relationship_id: item for item in (relationships or [])
+        }
 
     def list_objects(self, source_id: str, *, object_type=None) -> list[MetadataObject]:
-        items = [item for item in self._objects if item.source_id == source_id]
+        items = [item for item in self._objects.values() if item.source_id == source_id]
         if object_type is not None:
             items = [item for item in items if item.object_type == object_type]
         return items
 
+    def upsert_objects(self, objects: list[MetadataObject]) -> None:
+        for item in objects:
+            self._objects[item.object_id] = item
+
+    def upsert_relationships(self, relationships: list[Relationship]) -> None:
+        for item in relationships:
+            self._relationships[item.relationship_id] = item
+
     def list_relationships(self, source_id: str) -> list[Relationship]:
-        return [item for item in self._relationships if item.source_id == source_id]
+        return [
+            item
+            for item in self._relationships.values()
+            if item.source_id == source_id
+        ]
 
 
 class InMemoryTransformationPolicyRepository:
@@ -182,6 +218,94 @@ class InMemoryPublishJobRepository:
         self._items[job.job_id] = job
 
 
+class InMemoryBaselineRefreshJobRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, BaselineRefreshJob] = {}
+
+    def add(self, job: BaselineRefreshJob) -> None:
+        self._items[job.job_id] = job
+
+    def get_by_id(self, job_id: str) -> BaselineRefreshJob | None:
+        return self._items.get(job_id)
+
+    def list_all(self) -> list[BaselineRefreshJob]:
+        return list(self._items.values())
+
+    def save(self, job: BaselineRefreshJob) -> None:
+        self._items[job.job_id] = job
+
+
+class InMemoryBaselineRefreshScheduleRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, BaselineRefreshSchedule] = {}
+
+    def add(self, schedule: BaselineRefreshSchedule) -> None:
+        self._items[schedule.schedule_id] = schedule
+
+    def get_by_id(self, schedule_id: str) -> BaselineRefreshSchedule | None:
+        return self._items.get(schedule_id)
+
+    def list_all(self) -> list[BaselineRefreshSchedule]:
+        return list(self._items.values())
+
+    def list_enabled(self) -> list[BaselineRefreshSchedule]:
+        return [item for item in self._items.values() if item.enabled]
+
+    def save(self, schedule: BaselineRefreshSchedule) -> None:
+        self._items[schedule.schedule_id] = schedule
+
+
+class InMemoryExtractionJobRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, ExtractionJob] = {}
+
+    def add(self, job: ExtractionJob) -> None:
+        self._items[job.job_id] = job
+
+    def get_by_id(self, job_id: str) -> ExtractionJob | None:
+        return self._items.get(job_id)
+
+    def list_all(self) -> list[ExtractionJob]:
+        return list(self._items.values())
+
+    def save(self, job: ExtractionJob) -> None:
+        self._items[job.job_id] = job
+
+
+class InMemoryExtractionPlanSnapshotRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, ExtractionPlanSnapshot] = {}
+
+    def add(self, snapshot: ExtractionPlanSnapshot) -> None:
+        self._items[snapshot.snapshot_id] = snapshot
+
+    def get_by_id(self, snapshot_id: str) -> ExtractionPlanSnapshot | None:
+        return self._items.get(snapshot_id)
+
+
+class InMemoryExtractionArtifactRepository:
+    def __init__(self) -> None:
+        self._by_id: dict[str, ExtractionArtifact] = {}
+        self._by_job_id: dict[str, ExtractionArtifact] = {}
+
+    def add(self, artifact: ExtractionArtifact) -> None:
+        self._by_id[artifact.artifact_id] = artifact
+        self._by_job_id[artifact.job_id] = artifact
+
+    def get_by_id(self, artifact_id: str) -> ExtractionArtifact | None:
+        return self._by_id.get(artifact_id)
+
+    def get_by_job_id(self, job_id: str) -> ExtractionArtifact | None:
+        return self._by_job_id.get(job_id)
+
+    def list_all(self) -> list[ExtractionArtifact]:
+        return list(self._by_id.values())
+
+    def save(self, artifact: ExtractionArtifact) -> None:
+        self._by_id[artifact.artifact_id] = artifact
+        self._by_job_id[artifact.job_id] = artifact
+
+
 class InMemoryAuditEventRepository:
     def __init__(self) -> None:
         self._items: list[AuditEvent] = []
@@ -193,7 +317,49 @@ class InMemoryAuditEventRepository:
         return [event for event in self._items if event.subject_id == subject_id]
 
 
+class InMemoryLineageRepository:
+    def __init__(self) -> None:
+        self._items: list[LineageRecord] = []
+
+    def add(self, record: LineageRecord) -> None:
+        self._items.append(record)
+
+    def list_related(self, *, reference_type: str, reference_id: str) -> list[LineageRecord]:
+        return [
+            item
+            for item in self._items
+            if (item.source_type == reference_type and item.source_id == reference_id)
+            or (item.target_type == reference_type and item.target_id == reference_id)
+        ]
+
+
 class InMemoryJobQueue:
+    def __init__(self) -> None:
+        self._items: deque[str] = deque()
+
+    def enqueue(self, job_id: str) -> None:
+        self._items.append(job_id)
+
+    def dequeue(self) -> str | None:
+        if not self._items:
+            return None
+        return self._items.popleft()
+
+
+class InMemoryBaselineRefreshQueue:
+    def __init__(self) -> None:
+        self._items: deque[str] = deque()
+
+    def enqueue(self, job_id: str) -> None:
+        self._items.append(job_id)
+
+    def dequeue(self) -> str | None:
+        if not self._items:
+            return None
+        return self._items.popleft()
+
+
+class InMemoryExtractionQueue:
     def __init__(self) -> None:
         self._items: deque[str] = deque()
 
@@ -219,6 +385,32 @@ class StubPublishPipeline:
             "baselineId": None if baseline is None else baseline.baseline_id,
             "rowsPublished": 0,
             "validationStatus": "pending-real-implementation",
+        }
+
+
+class StubBaselineRefreshPipeline:
+    def execute(self, **kwargs) -> dict[str, object]:
+        existing_baseline = kwargs.get("existing_baseline")
+        return {
+            "refreshStrategy": "stubbed-refresh",
+            "version": "2026.01.02.1",
+            "reusedBaseline": existing_baseline is not None,
+        }
+
+
+class StubExtractionPipeline:
+    def execute(self, **kwargs) -> dict[str, object]:
+        plan = kwargs["plan"]
+        return {
+            "extractionStrategy": "stubbed-extraction",
+            "artifactPath": "/tmp/stub-extraction-artifact.jsonl",
+            "artifactFormat": "jsonl",
+            "materializedRowCount": len(plan.selected_object_ids),
+            "artifactFileSizeBytes": 128,
+            "artifactChecksum": "stub-checksum",
+            "artifactColumnCount": len(plan.root.selected_columns),
+            "selectedObjectCount": len(plan.selected_object_ids),
+            "selectedRelationshipCount": len(plan.selected_relationship_ids),
         }
 
 
@@ -297,6 +489,30 @@ def sample_metadata_objects() -> list[MetadataObject]:
     ]
 
 
+def sample_relationships() -> list[Relationship]:
+    source = sample_source()
+    return [
+        Relationship(
+            relationship_id="pk:source-crm-replica:crm.customers.customer_id",
+            source_id=source.source_id,
+            source_object_id="table-customers",
+            target_object_id="column-customers-email",
+            relationship_type="primary_key",
+            inferred=False,
+            confidence=1.0,
+        ),
+        Relationship(
+            relationship_id="fk:source-crm-replica:crm.orders.customer_id->crm.customers.customer_id",
+            source_id=source.source_id,
+            source_object_id="column-orders-customer-id",
+            target_object_id="column-customers-email",
+            relationship_type="foreign_key",
+            inferred=False,
+            confidence=1.0,
+        ),
+    ]
+
+
 def sample_baseline() -> SanitizedBaseline:
     source = sample_source()
     target = sample_target()
@@ -363,6 +579,23 @@ def sample_validation_report(
     )
 
 
+def sample_refresh_schedule() -> BaselineRefreshSchedule:
+    now = datetime(2026, 1, 1, 8, tzinfo=timezone.utc)
+    return BaselineRefreshSchedule(
+        schedule_id="refresh-schedule-1",
+        system_id="crm",
+        dataset_profile_id="profile-full-sanitized",
+        target_environment_type=EnvironmentType.DEV,
+        interval_minutes=60,
+        status=RefreshScheduleStatus.ENABLED,
+        created_by="steward@example.internal",
+        created_at=now,
+        updated_at=now,
+        next_run_at=now,
+        last_dispatched_at=None,
+    )
+
+
 def sample_sensitivity_tags() -> list[SensitivityTag]:
     source = sample_source()
     return [
@@ -372,7 +605,39 @@ def sample_sensitivity_tags() -> list[SensitivityTag]:
             object_id="column-customers-email",
             tag_name="pii.email",
             assigned_by="manual-review",
+            classification_status=ClassificationStatus.SENSITIVE,
         )
+    ]
+
+
+def sample_classification_tags() -> list[SensitivityTag]:
+    source = sample_source()
+    return [
+        SensitivityTag(
+            tag_id="tag-email",
+            source_id=source.source_id,
+            object_id="column-customers-email",
+            tag_name="pii.email",
+            assigned_by="manual-review",
+            classification_status=ClassificationStatus.SENSITIVE,
+        ),
+        SensitivityTag(
+            tag_id="tag-status",
+            source_id=source.source_id,
+            object_id="column-customers-status",
+            tag_name="classification.non_sensitive",
+            assigned_by="manual-review",
+            classification_status=ClassificationStatus.NON_SENSITIVE,
+        ),
+        SensitivityTag(
+            tag_id="tag-email-review",
+            source_id=source.source_id,
+            object_id="column-customers-email",
+            tag_name="pii.email",
+            assigned_by="classifier",
+            classification_status=ClassificationStatus.NEEDS_REVIEW,
+            approved=False,
+        ),
     ]
 
 
@@ -469,6 +734,18 @@ def build_policy_coverage_query_service(
         systems=InMemorySystemRepository([sample_system()]),
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         coverage=build_coverage_evaluation_service(clock=coverage_clock),
+    )
+
+
+def build_baseline_query_service() -> BaselineQueryService:
+    return BaselineQueryService(
+        systems=InMemorySystemRepository([sample_system()]),
+        baselines=InMemoryBaselineRepository([sample_baseline()]),
+        validations=ValidationLookupService(
+            InMemoryValidationRepository([sample_validation_report()])
+        ),
+        validation_summary=PublishValidationSummaryService(),
+        eligibility=BaselineEligibilityExplanationService(),
     )
 
 

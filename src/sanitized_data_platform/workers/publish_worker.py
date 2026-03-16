@@ -8,9 +8,15 @@ from sanitized_data_platform.application.ports import (
     DatasetProfileRepository,
     IdGeneratorPort,
     JobQueuePort,
+    LineageRepository,
     PublishJobRepository,
     PublishPipelinePort,
     TargetEnvironmentRepository,
+    ValidationRepository,
+)
+from sanitized_data_platform.application.services import (
+    LineageRecordingService,
+    ValidationLookupService,
 )
 from sanitized_data_platform.domain.entities import AuditEvent
 from sanitized_data_platform.domain.errors import DomainError
@@ -29,6 +35,8 @@ class PublishWorker:
         dataset_profiles: DatasetProfileRepository,
         pipeline: PublishPipelinePort,
         audits: AuditEventRepository,
+        lineage: LineageRepository,
+        validations: ValidationRepository,
         clock: ClockPort,
         ids: IdGeneratorPort,
     ) -> None:
@@ -40,6 +48,12 @@ class PublishWorker:
         self._dataset_profiles = dataset_profiles
         self._pipeline = pipeline
         self._audits = audits
+        self._lineage = LineageRecordingService(
+            lineage=lineage,
+            validations=ValidationLookupService(validations),
+            clock=clock,
+            ids=ids,
+        )
         self._clock = clock
         self._ids = ids
 
@@ -86,6 +100,7 @@ class PublishWorker:
                 execution_summary=summary,
             )
             self._jobs.save(job)
+            self._lineage.record_publish_completion(job=job, baseline=baseline)
             self._record_event(
                 job.job_id,
                 "publish_job_completed",
