@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Protocol
 
 from sanitized_data_platform.domain.entities import (
+    ArtifactPublishJob,
     AuditEvent,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
@@ -101,6 +102,13 @@ class PublishJobRepository(Protocol):
     def save(self, job: PublishJob) -> None: ...
 
 
+class ArtifactPublishJobRepository(Protocol):
+    def add(self, job: ArtifactPublishJob) -> None: ...
+    def get_by_id(self, job_id: str) -> ArtifactPublishJob | None: ...
+    def list_all(self) -> list[ArtifactPublishJob]: ...
+    def save(self, job: ArtifactPublishJob) -> None: ...
+
+
 class BaselineRefreshJobRepository(Protocol):
     def add(self, job: BaselineRefreshJob) -> None: ...
     def get_by_id(self, job_id: str) -> BaselineRefreshJob | None: ...
@@ -161,6 +169,11 @@ class ExtractionQueuePort(Protocol):
     def dequeue(self) -> str | None: ...
 
 
+class ArtifactPublishQueuePort(Protocol):
+    def enqueue(self, job_id: str) -> None: ...
+    def dequeue(self) -> str | None: ...
+
+
 class PolicyPort(Protocol):
     def assert_publish_allowed(
         self,
@@ -170,6 +183,15 @@ class PolicyPort(Protocol):
         profile: DatasetProfile,
         requested_by: str,
     ) -> None: ...
+
+
+class TokenVaultPort(Protocol):
+    def tokenize(
+        self,
+        *,
+        domain_id: str,
+        value: object,
+    ) -> str: ...
 
 
 class PublishPipelinePort(Protocol):
@@ -201,4 +223,14 @@ class ExtractionPipelinePort(Protocol):
         *,
         job: ExtractionJob,
         plan: ExtractionPlan,
+    ) -> dict[str, object]: ...
+
+
+class ArtifactPublishPipelinePort(Protocol):
+    def execute(
+        self,
+        *,
+        job: ArtifactPublishJob,
+        artifact: ExtractionArtifact,
+        target: TargetEnvironment,
     ) -> dict[str, object]: ...

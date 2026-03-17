@@ -86,7 +86,8 @@ class ExtractionWorker:
                 )
             plan = plan_snapshot.to_plan()
             summary = self._pipeline.execute(job=job, plan=plan)
-            artifact_id = self._record_artifact(job=job, summary=summary)
+            artifact = self._record_artifact(job=job, summary=summary)
+            artifact_id = None if artifact is None else artifact.artifact_id
 
             completed_time = self._clock.now()
             job = job.transition_to(
@@ -101,6 +102,11 @@ class ExtractionWorker:
                 plan=plan,
                 plan_snapshot=plan_snapshot,
             )
+            if artifact is not None:
+                self._lineage.record_extraction_artifact_materialization(
+                    job=job,
+                    artifact=artifact,
+                )
             self._record_event(
                 job.job_id,
                 "extraction_job_completed",
@@ -132,7 +138,7 @@ class ExtractionWorker:
         *,
         job,
         summary: dict[str, object],
-    ) -> str | None:
+    ) -> ExtractionArtifact | None:
         artifact_path = summary.get("artifactPath")
         artifact_format = summary.get("artifactFormat")
         if not isinstance(artifact_path, str) or not artifact_path:
@@ -153,13 +159,22 @@ class ExtractionWorker:
         column_count = summary.get("artifactColumnCount")
         if column_count is not None and not isinstance(column_count, int):
             raise DomainError("Extraction artifact column count must be an integer when provided.")
+        artifact_kind = summary.get("artifactKind", ExtractionArtifactKind.SAMPLE.value)
+        if not isinstance(artifact_kind, str):
+            raise DomainError("Extraction artifact kind must be a string when provided.")
+        try:
+            parsed_artifact_kind = ExtractionArtifactKind(artifact_kind.lower())
+        except ValueError as exc:
+            raise DomainError(
+                f"Unsupported extraction artifact kind: {artifact_kind}"
+            ) from exc
 
         artifact = ExtractionArtifact(
             artifact_id=self._ids.new_id("extraction-artifact"),
             job_id=job.job_id,
             source_id=job.source_id,
             root_object_id=job.root_object_id,
-            kind=ExtractionArtifactKind.SAMPLE,
+            kind=parsed_artifact_kind,
             artifact_format=ExtractionArtifactFormat.JSONL,
             artifact_path=artifact_path,
             row_count=row_count,
@@ -170,7 +185,7 @@ class ExtractionWorker:
         )
         artifact = self._artifact_lifecycle.attach_default_expiration(artifact)
         self._artifacts.add(artifact)
-        return artifact.artifact_id
+        return artifact
 
     def _record_event(
         self,

@@ -49,6 +49,7 @@ def test_snapshot_query_service_returns_persisted_plan_detail():
             max_depth=1,
             requested_by="developer@example.internal",
             selected_columns=["customer_id"],
+            artifact_kind="full",
         )
     )
 
@@ -62,6 +63,7 @@ def test_snapshot_query_service_returns_persisted_plan_detail():
     assert snapshot.max_depth == 1
     assert snapshot.criteria[0].field_name == "customer_id"
     assert snapshot.selected_columns == ["customer_id"]
+    assert snapshot.artifact_kind == "full"
     assert set(snapshot.selected_object_ids) == {"table-customers", "table-orders"}
     assert snapshot.selected_relationship_ids == [
         "fk:orders.customer_id->customers.customer_id"

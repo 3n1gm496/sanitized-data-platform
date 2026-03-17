@@ -291,6 +291,7 @@ class ExtractionRoot:
     object_id: str
     criteria: tuple[SelectionCriteria, ...] = ()
     selected_columns: tuple[str, ...] = ()
+    artifact_kind: ExtractionArtifactKind = ExtractionArtifactKind.SAMPLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +689,62 @@ class PublishJob:
         updated_at: datetime,
         execution_summary: dict[str, Any] | None = None,
     ) -> "PublishJob":
+        summary = dict(self.execution_summary)
+        if execution_summary:
+            summary.update(execution_summary)
+
+        return replace(
+            self,
+            status=status,
+            updated_at=updated_at,
+            execution_summary=summary,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPublishJob:
+    job_id: str
+    extraction_artifact_id: str
+    source_id: str
+    root_object_id: str
+    target_environment_id: str
+    requested_by: str
+    status: JobStatus
+    created_at: datetime
+    updated_at: datetime
+    execution_summary: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        job_id: str,
+        extraction_artifact_id: str,
+        source_id: str,
+        root_object_id: str,
+        target_environment_id: str,
+        requested_by: str,
+        created_at: datetime,
+    ) -> "ArtifactPublishJob":
+        return cls(
+            job_id=job_id,
+            extraction_artifact_id=extraction_artifact_id,
+            source_id=source_id,
+            root_object_id=root_object_id,
+            target_environment_id=target_environment_id,
+            requested_by=requested_by,
+            status=JobStatus.PENDING,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+
+    def transition_to(
+        self,
+        status: JobStatus,
+        *,
+        updated_at: datetime,
+        execution_summary: dict[str, Any] | None = None,
+    ) -> "ArtifactPublishJob":
         summary = dict(self.execution_summary)
         if execution_summary:
             summary.update(execution_summary)

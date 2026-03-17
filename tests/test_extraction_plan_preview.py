@@ -98,6 +98,7 @@ def test_extraction_plan_preview_returns_root_only_plan():
 
     assert result.root_object_id == "table-customers"
     assert result.criteria[0].field_name == "customer_id"
+    assert result.artifact_kind == "sample"
     assert result.selected_object_ids == ["table-customers"]
     assert result.selected_relationship_ids == []
 
@@ -117,8 +118,27 @@ def test_extraction_plan_preview_returns_selected_columns_for_root():
     )
 
     assert result.root_object_id == "table-customers"
+    assert result.artifact_kind == "sample"
     assert result.selected_columns == ["customer_id"]
     assert result.selected_object_ids == ["table-customers"]
+
+
+def test_extraction_plan_preview_can_request_full_artifact_kind():
+    service = build_preview_service()
+
+    result = service.preview_plan(
+        PreviewExtractionPlanCommand(
+            source_id="source-crm-replica",
+            root_object_id="table-customers",
+            criteria=[],
+            artifact_kind="full",
+            include_related=False,
+            max_depth=1,
+        )
+    )
+
+    assert result.root_object_id == "table-customers"
+    assert result.artifact_kind == "full"
 
 
 def test_extraction_plan_preview_returns_fk_expanded_plan():

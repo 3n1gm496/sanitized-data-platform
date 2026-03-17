@@ -15,6 +15,7 @@ from sanitized_data_platform.application.services import (
     ValidationLookupService,
 )
 from sanitized_data_platform.domain.entities import (
+    ArtifactPublishJob,
     AuditEvent,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
@@ -42,6 +43,8 @@ from sanitized_data_platform.domain.enums import (
     DatabaseEngine,
     DatasetMode,
     EnvironmentType,
+    ExtractionArtifactFormat,
+    ExtractionArtifactKind,
     MetadataObjectType,
     RefreshScheduleStatus,
     TransformationType,
@@ -218,6 +221,23 @@ class InMemoryPublishJobRepository:
         self._items[job.job_id] = job
 
 
+class InMemoryArtifactPublishJobRepository:
+    def __init__(self) -> None:
+        self._items: dict[str, ArtifactPublishJob] = {}
+
+    def add(self, job: ArtifactPublishJob) -> None:
+        self._items[job.job_id] = job
+
+    def get_by_id(self, job_id: str) -> ArtifactPublishJob | None:
+        return self._items.get(job_id)
+
+    def list_all(self) -> list[ArtifactPublishJob]:
+        return list(self._items.values())
+
+    def save(self, job: ArtifactPublishJob) -> None:
+        self._items[job.job_id] = job
+
+
 class InMemoryBaselineRefreshJobRepository:
     def __init__(self) -> None:
         self._items: dict[str, BaselineRefreshJob] = {}
@@ -372,6 +392,19 @@ class InMemoryExtractionQueue:
         return self._items.popleft()
 
 
+class InMemoryArtifactPublishQueue:
+    def __init__(self) -> None:
+        self._items: deque[str] = deque()
+
+    def enqueue(self, job_id: str) -> None:
+        self._items.append(job_id)
+
+    def dequeue(self) -> str | None:
+        if not self._items:
+            return None
+        return self._items.popleft()
+
+
 class AllowAllPolicy:
     def assert_publish_allowed(self, **kwargs) -> None:
         return None
@@ -403,6 +436,7 @@ class StubExtractionPipeline:
         plan = kwargs["plan"]
         return {
             "extractionStrategy": "stubbed-extraction",
+            "artifactKind": plan.root.artifact_kind.value,
             "artifactPath": "/tmp/stub-extraction-artifact.jsonl",
             "artifactFormat": "jsonl",
             "materializedRowCount": len(plan.selected_object_ids),
@@ -412,6 +446,25 @@ class StubExtractionPipeline:
             "selectedObjectCount": len(plan.selected_object_ids),
             "selectedRelationshipCount": len(plan.selected_relationship_ids),
         }
+
+
+class StubArtifactPublishPipeline:
+    def execute(self, **kwargs) -> dict[str, object]:
+        artifact = kwargs["artifact"]
+        target = kwargs["target"]
+        return {
+            "deliveryStrategy": "artifact-import-stub",
+            "extractionArtifactId": artifact.artifact_id,
+            "targetEnvironmentId": target.environment_id,
+            "rootObjectId": artifact.root_object_id,
+            "rowsImported": artifact.row_count,
+            "artifactFormat": artifact.artifact_format.value,
+        }
+
+
+class StubTokenVault:
+    def tokenize(self, *, domain_id: str, value: object) -> str:
+        return f"tok::{domain_id}::{value}"
 
 
 def sample_source() -> DataSource:
@@ -530,6 +583,29 @@ def sample_baseline() -> SanitizedBaseline:
         status=BaselineStatus.ACTIVE,
         created_at=refreshed_at,
         refreshed_at=refreshed_at,
+    )
+
+
+def sample_extraction_artifact(
+    *,
+    artifact_id: str = "extraction-artifact-1",
+    job_id: str = "extraction-1",
+) -> ExtractionArtifact:
+    source = sample_source()
+    created_at = datetime(2026, 1, 1, 9, tzinfo=timezone.utc)
+    return ExtractionArtifact(
+        artifact_id=artifact_id,
+        job_id=job_id,
+        source_id=source.source_id,
+        root_object_id="table:source-crm-replica:public.customers",
+        kind=ExtractionArtifactKind.FULL,
+        artifact_format=ExtractionArtifactFormat.JSONL,
+        artifact_path="/tmp/extraction-artifact-1.jsonl",
+        row_count=3,
+        created_at=created_at,
+        file_size_bytes=256,
+        checksum="artifact-checksum-1",
+        column_count=2,
     )
 
 

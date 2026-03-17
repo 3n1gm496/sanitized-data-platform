@@ -46,6 +46,7 @@ def _completed_job(job_id: str, artifact_id: str) -> ExtractionJob:
 
 def test_retention_worker_expires_due_artifacts_and_keeps_non_due_available():
     artifact_repo = InMemoryExtractionArtifactRepository()
+    audit_repo = InMemoryAuditEventRepository()
     due_artifact = ExtractionArtifact(
         artifact_id="artifact-due",
         job_id="extraction-due",
@@ -81,7 +82,7 @@ def test_retention_worker_expires_due_artifacts_and_keeps_non_due_available():
         ),
         artifacts=artifact_repo,
         clock=clock,
-        audits=InMemoryAuditEventRepository(),
+        audits=audit_repo,
         ids=SequentialIdGenerator(),
     )
 
@@ -89,6 +90,8 @@ def test_retention_worker_expires_due_artifacts_and_keeps_non_due_available():
 
     stored_due = artifact_repo.get_by_id("artifact-due")
     stored_non_due = artifact_repo.get_by_id("artifact-fresh")
+    audit_events = audit_repo.list_for_subject("artifact-retention-run-1")
+    artifact_audit_events = audit_repo.list_for_subject("artifact-due")
     assert summary["evaluatedArtifactCount"] == 2
     assert summary["expiredArtifactCount"] == 1
     assert summary["runId"] == "artifact-retention-run-1"
@@ -96,6 +99,18 @@ def test_retention_worker_expires_due_artifacts_and_keeps_non_due_available():
     assert stored_due.status == ExtractionArtifactStatus.EXPIRED
     assert stored_non_due is not None
     assert stored_non_due.status == ExtractionArtifactStatus.AVAILABLE
+    assert [event.event_type for event in audit_events] == [
+        "extraction_artifact_retention_completed"
+    ]
+    assert audit_events[0].details == {
+        "evaluatedArtifactCount": 2,
+        "expiredArtifactCount": 1,
+    }
+    assert [event.event_type for event in artifact_audit_events] == [
+        "extraction_artifact_expired"
+    ]
+    assert artifact_audit_events[0].subject_type == "extraction_artifact"
+    assert artifact_audit_events[0].details["runId"] == "artifact-retention-run-1"
 
 
 def test_retention_worker_leaves_non_due_artifacts_available_for_query():

@@ -101,3 +101,81 @@ def test_lineage_query_service_lists_extraction_job_lineage():
         "extraction_from_source",
         "extraction_root_selected",
     ]
+
+
+def test_lineage_query_service_lists_artifact_publish_job_lineage():
+    repository = InMemoryLineageRepository()
+    repository.add(
+        LineageRecord(
+            record_id="lineage-1",
+            source_type="extraction_artifact",
+            source_id="extraction-artifact-1",
+            target_type="artifact_publish_job",
+            target_id="artifact-publish-job-1",
+            event_type="artifact_publish_from_extraction_artifact",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            details={"rootObjectId": "table:source-crm-replica:public.customers"},
+        )
+    )
+    repository.add(
+        LineageRecord(
+            record_id="lineage-2",
+            source_type="artifact_publish_job",
+            source_id="artifact-publish-job-1",
+            target_type="target_environment",
+            target_id="env-dev",
+            event_type="artifact_publish_delivered_to_target_environment",
+            created_at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+            details={"targetTable": "public.customers"},
+        )
+    )
+
+    result = LineageQueryService(repository).get_artifact_publish_job_lineage(
+        "artifact-publish-job-1"
+    )
+
+    assert result.subject_type == "artifact_publish_job"
+    assert result.subject_id == "artifact-publish-job-1"
+    assert [item.event_type for item in result.items] == [
+        "artifact_publish_from_extraction_artifact",
+        "artifact_publish_delivered_to_target_environment",
+    ]
+
+
+def test_lineage_query_service_lists_extraction_artifact_lineage():
+    repository = InMemoryLineageRepository()
+    repository.add(
+        LineageRecord(
+            record_id="lineage-1",
+            source_type="extraction_job",
+            source_id="extraction-1",
+            target_type="extraction_artifact",
+            target_id="extraction-artifact-1",
+            event_type="extraction_materialized_artifact",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            details={"artifactKind": "sample"},
+        )
+    )
+    repository.add(
+        LineageRecord(
+            record_id="lineage-2",
+            source_type="extraction_artifact",
+            source_id="extraction-artifact-1",
+            target_type="artifact_publish_job",
+            target_id="artifact-publish-job-1",
+            event_type="artifact_publish_from_extraction_artifact",
+            created_at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+            details={"targetTable": "public.customers"},
+        )
+    )
+
+    result = LineageQueryService(repository).get_extraction_artifact_lineage(
+        "extraction-artifact-1"
+    )
+
+    assert result.subject_type == "extraction_artifact"
+    assert result.subject_id == "extraction-artifact-1"
+    assert [item.event_type for item in result.items] == [
+        "extraction_materialized_artifact",
+        "artifact_publish_from_extraction_artifact",
+    ]

@@ -4,12 +4,16 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from sanitized_data_platform.application.dto import (
+    CreateArtifactPublishJobCommand,
     CreateExtractionJobCommand,
     CreatePublishJobCommand,
     CreateRefreshScheduleCommand,
     PreviewExtractionPlanCommand,
 )
 from sanitized_data_platform.application.services import (
+    ArtifactPublishMonitoringService,
+    ArtifactPublishRequestService,
+    AuditQueryService,
     BaselineQueryService,
     BaselineRefreshMonitoringService,
     BaselineRefreshRequestService,
@@ -46,6 +50,9 @@ class ApiApp:
     def __init__(
         self,
         *,
+        artifact_publish_monitoring: ArtifactPublishMonitoringService,
+        artifact_publish_requests: ArtifactPublishRequestService,
+        audit_queries: AuditQueryService,
         baselines: BaselineQueryService,
         baseline_refresh_monitoring: BaselineRefreshMonitoringService,
         baseline_refresh_requests: BaselineRefreshRequestService,
@@ -67,6 +74,9 @@ class ApiApp:
         validation_queries: ValidationQueryService,
         job_monitoring: JobMonitoringService,
     ) -> None:
+        self._artifact_publish_monitoring = artifact_publish_monitoring
+        self._artifact_publish_requests = artifact_publish_requests
+        self._audit_queries = audit_queries
         self._baselines = baselines
         self._baseline_refresh_monitoring = baseline_refresh_monitoring
         self._baseline_refresh_requests = baseline_refresh_requests
@@ -124,6 +134,7 @@ class ApiApp:
                     root_object_id=body["rootObjectId"],
                     criteria=body.get("criteria", []),
                     selected_columns=body.get("selectedColumns"),
+                    artifact_kind=body.get("artifactKind", "sample"),
                     include_related=body.get("includeRelated", False),
                     max_depth=body.get("maxDepth", 1),
                 )
@@ -139,9 +150,52 @@ class ApiApp:
                     max_depth=body.get("maxDepth", 1),
                     requested_by=body["requestedBy"],
                     selected_columns=body.get("selectedColumns"),
+                    artifact_kind=body.get("artifactKind", "sample"),
                 )
                 job = self._extraction_job_requests.create_job(command)
                 return ApiResponse(status_code=202, body=asdict(job))
+
+            if method == "POST" and path == "/api/v1/artifact-publish-jobs":
+                command = CreateArtifactPublishJobCommand(
+                    extraction_artifact_id=body["extractionArtifactId"],
+                    target_environment_id=body["targetEnvironmentId"],
+                    requested_by=body["requestedBy"],
+                )
+                job = self._artifact_publish_requests.create_job(command)
+                return ApiResponse(status_code=202, body=asdict(job))
+
+            if method == "GET" and path == "/api/v1/artifact-publish-jobs":
+                jobs = self._artifact_publish_monitoring.list_jobs()
+                return ApiResponse(status_code=200, body=[asdict(job) for job in jobs])
+
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/artifact-publish-jobs/")
+                and path.endswith("/audit-events")
+            ):
+                job_id = (
+                    path.removeprefix("/api/v1/artifact-publish-jobs/")
+                    .removesuffix("/audit-events")
+                )
+                events = self._audit_queries.list_events_for_subject(job_id)
+                return ApiResponse(status_code=200, body=[asdict(item) for item in events])
+
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/artifact-publish-jobs/")
+                and path.endswith("/lineage")
+            ):
+                job_id = (
+                    path.removeprefix("/api/v1/artifact-publish-jobs/")
+                    .removesuffix("/lineage")
+                )
+                lineage = self._lineage_queries.get_artifact_publish_job_lineage(job_id)
+                return ApiResponse(status_code=200, body=asdict(lineage))
+
+            if method == "GET" and path.startswith("/api/v1/artifact-publish-jobs/"):
+                job_id = path.removeprefix("/api/v1/artifact-publish-jobs/")
+                job = self._artifact_publish_monitoring.get_job(job_id)
+                return ApiResponse(status_code=200, body=asdict(job))
 
             if method == "GET" and path.startswith("/api/v1/extraction-plan-snapshots/"):
                 snapshot_id = path.removeprefix("/api/v1/extraction-plan-snapshots/")
@@ -152,6 +206,15 @@ class ApiApp:
                 jobs = self._extraction_job_monitoring.list_jobs()
                 return ApiResponse(status_code=200, body=[asdict(job) for job in jobs])
 
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/extraction-jobs/")
+                and path.endswith("/audit-events")
+            ):
+                job_id = path.removeprefix("/api/v1/extraction-jobs/").removesuffix("/audit-events")
+                events = self._audit_queries.list_events_for_subject(job_id)
+                return ApiResponse(status_code=200, body=[asdict(item) for item in events])
+
             if method == "GET" and path.startswith("/api/v1/extraction-jobs/") and path.endswith("/lineage"):
                 job_id = path.removeprefix("/api/v1/extraction-jobs/").removesuffix("/lineage")
                 lineage = self._lineage_queries.get_extraction_job_lineage(job_id)
@@ -160,6 +223,35 @@ class ApiApp:
             if method == "GET" and path.startswith("/api/v1/extraction-jobs/") and path.endswith("/artifact"):
                 job_id = path.removeprefix("/api/v1/extraction-jobs/").removesuffix("/artifact")
                 artifact = self._extraction_artifacts.get_artifact_for_job(job_id)
+                return ApiResponse(status_code=200, body=asdict(artifact))
+
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/extraction-artifacts/")
+                and path.endswith("/audit-events")
+            ):
+                artifact_id = (
+                    path.removeprefix("/api/v1/extraction-artifacts/")
+                    .removesuffix("/audit-events")
+                )
+                events = self._audit_queries.list_events_for_subject(artifact_id)
+                return ApiResponse(status_code=200, body=[asdict(item) for item in events])
+
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/extraction-artifacts/")
+                and path.endswith("/lineage")
+            ):
+                artifact_id = (
+                    path.removeprefix("/api/v1/extraction-artifacts/")
+                    .removesuffix("/lineage")
+                )
+                lineage = self._lineage_queries.get_extraction_artifact_lineage(artifact_id)
+                return ApiResponse(status_code=200, body=asdict(lineage))
+
+            if method == "GET" and path.startswith("/api/v1/extraction-artifacts/"):
+                artifact_id = path.removeprefix("/api/v1/extraction-artifacts/")
+                artifact = self._extraction_artifacts.get_artifact_by_id(artifact_id)
                 return ApiResponse(status_code=200, body=asdict(artifact))
 
             if method == "GET" and path.startswith("/api/v1/extraction-jobs/"):
@@ -228,6 +320,18 @@ class ApiApp:
                     body=[asdict(job) for job in jobs],
                 )
 
+            if (
+                method == "GET"
+                and path.startswith("/api/v1/baseline-refresh-jobs/")
+                and path.endswith("/audit-events")
+            ):
+                job_id = (
+                    path.removeprefix("/api/v1/baseline-refresh-jobs/")
+                    .removesuffix("/audit-events")
+                )
+                events = self._audit_queries.list_events_for_subject(job_id)
+                return ApiResponse(status_code=200, body=[asdict(item) for item in events])
+
             if method == "GET" and path.startswith("/api/v1/baseline-refresh-jobs/"):
                 job_id = path.removeprefix("/api/v1/baseline-refresh-jobs/")
                 job = self._baseline_refresh_monitoring.get_job(job_id)
@@ -290,6 +394,11 @@ class ApiApp:
                 job_id = path.removeprefix("/api/v1/jobs/").removesuffix("/lineage")
                 lineage = self._lineage_queries.get_publish_job_lineage(job_id)
                 return ApiResponse(status_code=200, body=asdict(lineage))
+
+            if method == "GET" and path.startswith("/api/v1/jobs/") and path.endswith("/audit-events"):
+                job_id = path.removeprefix("/api/v1/jobs/").removesuffix("/audit-events")
+                events = self._audit_queries.list_events_for_subject(job_id)
+                return ApiResponse(status_code=200, body=[asdict(item) for item in events])
 
             if method == "GET" and path.startswith("/api/v1/jobs/"):
                 job_id = path.removeprefix("/api/v1/jobs/")

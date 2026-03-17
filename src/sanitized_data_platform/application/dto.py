@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Any
 
 from sanitized_data_platform.domain.entities import (
+    ArtifactPublishJob,
+    AuditEvent,
     BaselineRefreshJob,
     ExtractionArtifact,
     BaselineRefreshSchedule,
@@ -46,6 +48,13 @@ class CreatePublishJobCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateArtifactPublishJobCommand:
+    extraction_artifact_id: str
+    target_environment_id: str
+    requested_by: str
+
+
+@dataclass(frozen=True, slots=True)
 class CreateBaselineRefreshJobCommand:
     system_id: str
     dataset_profile_id: str
@@ -70,6 +79,7 @@ class PreviewExtractionPlanCommand:
     root_object_id: str
     criteria: list[dict[str, str]]
     selected_columns: list[str] | None = None
+    artifact_kind: str = "sample"
     include_related: bool = False
     max_depth: int = 1
 
@@ -83,6 +93,7 @@ class CreateExtractionJobCommand:
     max_depth: int
     requested_by: str
     selected_columns: list[str] | None = None
+    artifact_kind: str = "sample"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +249,29 @@ class LineageView:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditEventView:
+    event_id: str
+    event_type: str
+    actor: str
+    subject_type: str
+    subject_id: str
+    details: dict[str, Any]
+    created_at: datetime
+
+    @classmethod
+    def from_event(cls, event: AuditEvent) -> "AuditEventView":
+        return cls(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            actor=event.actor,
+            subject_type=event.subject_type,
+            subject_id=event.subject_id,
+            details=dict(event.details),
+            created_at=event.created_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class JobView:
     job_id: str
     status: str
@@ -271,6 +305,35 @@ class JobView:
             target_environment_id=job.target_environment_id,
             dataset_profile_id=job.dataset_profile_id,
             requested_by=job.requested_by,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            execution_summary=dict(job.execution_summary),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPublishJobView:
+    job_id: str
+    extraction_artifact_id: str
+    source_id: str
+    root_object_id: str
+    target_environment_id: str
+    requested_by: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    execution_summary: dict[str, Any]
+
+    @classmethod
+    def from_job(cls, job: ArtifactPublishJob) -> "ArtifactPublishJobView":
+        return cls(
+            job_id=job.job_id,
+            extraction_artifact_id=job.extraction_artifact_id,
+            source_id=job.source_id,
+            root_object_id=job.root_object_id,
+            target_environment_id=job.target_environment_id,
+            requested_by=job.requested_by,
+            status=job.status.value,
             created_at=job.created_at,
             updated_at=job.updated_at,
             execution_summary=dict(job.execution_summary),
@@ -321,6 +384,7 @@ class ExtractionPlanPreviewView:
     root_object_id: str
     criteria: list[ExtractionPlanCriteriaView]
     selected_columns: list[str]
+    artifact_kind: str
     include_related: bool
     max_depth: int
     selected_object_ids: list[str]
@@ -341,6 +405,7 @@ class ExtractionPlanPreviewView:
                 for item in plan.root.criteria
             ],
             selected_columns=list(plan.root.selected_columns),
+            artifact_kind=plan.root.artifact_kind.value,
             include_related=plan.traversal_rule.include_related,
             max_depth=plan.traversal_rule.max_depth,
             selected_object_ids=list(plan.selected_object_ids),
@@ -356,6 +421,7 @@ class ExtractionPlanSnapshotDetailView:
     root_object_id: str
     criteria: list[ExtractionPlanCriteriaView]
     selected_columns: list[str]
+    artifact_kind: str
     include_related: bool
     max_depth: int
     selected_object_ids: list[str]
@@ -382,6 +448,7 @@ class ExtractionPlanSnapshotDetailView:
                 for item in snapshot.root.criteria
             ],
             selected_columns=list(snapshot.root.selected_columns),
+            artifact_kind=snapshot.root.artifact_kind.value,
             include_related=snapshot.traversal_rule.include_related,
             max_depth=snapshot.traversal_rule.max_depth,
             selected_object_ids=list(snapshot.selected_object_ids),

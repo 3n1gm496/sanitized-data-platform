@@ -9,11 +9,16 @@ from typing import Any, Callable, Protocol
 
 from sanitized_data_platform.application.ports import (
     DataSourceRepository,
+    TokenVaultPort,
     TransformationPolicyRepository,
 )
 from sanitized_data_platform.application.services import RowTransformationService
-from sanitized_data_platform.domain.entities import ExtractionJob, ExtractionPlan
-from sanitized_data_platform.domain.enums import DatabaseEngine
+from sanitized_data_platform.domain.entities import (
+    ExtractionJob,
+    ExtractionPlan,
+    TransformationPolicy,
+)
+from sanitized_data_platform.domain.enums import DatabaseEngine, ExtractionArtifactKind
 from sanitized_data_platform.domain.errors import DomainError
 
 
@@ -21,6 +26,7 @@ class CursorLike(Protocol):
     def execute(self, query: str, params: tuple[Any, ...] | None = None) -> None: ...
     def fetchone(self) -> tuple[Any, ...] | None: ...
     def fetchall(self) -> list[tuple[Any, ...]]: ...
+    def fetchmany(self, size: int) -> list[tuple[Any, ...]]: ...
     @property
     def description(self) -> tuple[tuple[Any, ...], ...] | None: ...
     def close(self) -> None: ...
@@ -35,6 +41,7 @@ class PostgreSQLExtractionPipelineAdapter:
     """Minimal real extraction execution for PostgreSQL table-root plans."""
 
     _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _STREAM_BATCH_SIZE = 1000
     _OPERATORS = {
         "eq": "=",
         "ne": "!=",
@@ -71,13 +78,16 @@ class PostgreSQLExtractionPipelineAdapter:
         connect: Callable[[str], ConnectionLike],
         policies: TransformationPolicyRepository | None = None,
         transformations: RowTransformationService | None = None,
+        token_vault: TokenVaultPort | None = None,
         sample_limit: int = 10,
         artifact_dir: str | None = None,
     ) -> None:
         self._data_sources = data_sources
         self._connect = connect
         self._policies = policies
-        self._transformations = transformations or RowTransformationService()
+        self._transformations = transformations or RowTransformationService(
+            token_vault=token_vault
+        )
         self._sample_limit = sample_limit
         self._artifact_dir = artifact_dir
 
@@ -112,32 +122,64 @@ class PostgreSQLExtractionPipelineAdapter:
         )
         count_query = f'SELECT COUNT(*) FROM "{schema_name}"."{table_name}"{where_sql}'
         row_count = self._execute_count(source.endpoint, count_query, params)
-        sample_rows = self._execute_row_sample(
-            source.endpoint,
-            schema_name,
-            table_name,
-            selected_columns,
-            deterministic_ordering,
-            where_sql,
-            params,
-            self._sample_limit,
-        )
-        transformed_rows, transformation_summary = self._apply_transformations(
-            system_id=source.system_id,
-            object_id=plan.root.object_id,
-            object_name=f"{schema_name}.{table_name}",
-            rows=sample_rows,
-        )
-        artifact_path = self._materialize_jsonl(transformed_rows)
-        artifact_metadata = self._collect_artifact_metadata(
-            artifact_path=artifact_path,
-            column_count=len(selected_columns),
-        )
+        active_policies = self._list_active_policies(source.system_id)
+
+        if plan.root.artifact_kind == ExtractionArtifactKind.FULL:
+            materialization_result = self._stream_rows_to_jsonl(
+                endpoint=source.endpoint,
+                object_id=plan.root.object_id,
+                object_name=f"{schema_name}.{table_name}",
+                schema_name=schema_name,
+                table_name=table_name,
+                selected_columns=selected_columns,
+                ordering_columns=deterministic_ordering,
+                where_sql=where_sql,
+                where_params=params,
+                policies=active_policies,
+            )
+            preview_rows = materialization_result["previewRows"]
+            preview_limit: int | None = self._sample_limit
+            artifact_contains_full_result = True
+            artifact_path = str(materialization_result["artifactPath"])
+            materialized_row_count = int(materialization_result["materializedRowCount"])
+            artifact_metadata = {
+                "fileSizeBytes": materialization_result["fileSizeBytes"],
+                "checksum": materialization_result["checksum"],
+                "columnCount": len(selected_columns),
+            }
+            transformation_summary = materialization_result["transformationSummary"]
+        else:
+            materialized_rows = self._execute_rows(
+                source.endpoint,
+                schema_name,
+                table_name,
+                selected_columns,
+                deterministic_ordering,
+                where_sql,
+                params,
+                self._sample_limit,
+            )
+            transformed_rows, transformation_summary = self._apply_transformations(
+                object_id=plan.root.object_id,
+                object_name=f"{schema_name}.{table_name}",
+                rows=materialized_rows,
+                policies=active_policies,
+            )
+            artifact_path = self._materialize_jsonl(transformed_rows)
+            artifact_metadata = self._collect_artifact_metadata(
+                artifact_path=artifact_path,
+                column_count=len(selected_columns),
+            )
+            preview_rows = transformed_rows
+            preview_limit = self._sample_limit
+            artifact_contains_full_result = False
+            materialized_row_count = len(transformed_rows)
 
         summary: dict[str, object] = {
             "extractionStrategy": "postgres-table-root",
             "rootObjectId": plan.root.object_id,
             "rootTable": f"{schema_name}.{table_name}",
+            "artifactKind": plan.root.artifact_kind.value,
             "appliedCriteria": [
                 {
                     "fieldName": item.field_name,
@@ -150,12 +192,13 @@ class PostgreSQLExtractionPipelineAdapter:
             "sampleOrderedBy": deterministic_ordering if deterministic_ordering else None,
             "sampleOrderingDeterministic": bool(deterministic_ordering),
             "rowCount": row_count,
-            "rowSampleLimit": self._sample_limit,
-            "rowSampleCount": len(transformed_rows),
-            "rowSample": transformed_rows,
+            "rowSampleLimit": preview_limit,
+            "rowSampleCount": len(preview_rows),
+            "rowSample": preview_rows,
+            "artifactContainsFullResult": artifact_contains_full_result,
             "artifactPath": artifact_path,
             "artifactFormat": "jsonl",
-            "materializedRowCount": len(transformed_rows),
+            "materializedRowCount": materialized_row_count,
             "artifactFileSizeBytes": artifact_metadata["fileSizeBytes"],
             "artifactChecksum": artifact_metadata["checksum"],
             "artifactColumnCount": artifact_metadata["columnCount"],
@@ -182,6 +225,10 @@ class PostgreSQLExtractionPipelineAdapter:
                 "Unsupported transformation types were skipped: "
                 + ", ".join(str(value) for value in unsupported_types)
             )
+        if artifact_contains_full_result:
+            summary.setdefault("notes", []).append(
+                "Full extraction artifact contains all matching rows; inline rowSample is a bounded preview only."
+            )
         return summary
 
     def _collect_artifact_metadata(
@@ -201,12 +248,12 @@ class PostgreSQLExtractionPipelineAdapter:
     def _apply_transformations(
         self,
         *,
-        system_id: str,
         object_id: str,
         object_name: str,
         rows: list[dict[str, Any]],
+        policies: list[TransformationPolicy],
     ) -> tuple[list[dict[str, Any]], dict[str, object]]:
-        if self._policies is None:
+        if not policies:
             return (
                 [dict(row) for row in rows],
                 {
@@ -216,13 +263,17 @@ class PostgreSQLExtractionPipelineAdapter:
                     "unsupportedTransformationTypes": [],
                 },
             )
-        policies = self._policies.list_active_for_system(system_id)
         return self._transformations.apply_to_rows(
             object_id=object_id,
             object_name=object_name,
             rows=rows,
             policies=policies,
         )
+
+    def _list_active_policies(self, system_id: str) -> list[TransformationPolicy]:
+        if self._policies is None:
+            return []
+        return self._policies.list_active_for_system(system_id)
 
     def _build_where_clause(
         self,
@@ -273,7 +324,7 @@ class PostgreSQLExtractionPipelineAdapter:
             return 0
         return int(result[0])
 
-    def _execute_row_sample(
+    def _execute_rows(
         self,
         endpoint: str,
         schema_name: str,
@@ -282,14 +333,17 @@ class PostgreSQLExtractionPipelineAdapter:
         ordering_columns: list[str],
         where_sql: str,
         where_params: tuple[Any, ...],
-        sample_limit: int,
+        row_limit: int | None,
     ) -> list[dict[str, Any]]:
-        projected_columns = ", ".join(f'"{name}"' for name in selected_columns)
-        order_sql = ""
-        if ordering_columns:
-            order_sql = " ORDER BY " + ", ".join(f'"{name}" ASC' for name in ordering_columns)
-        query = f'SELECT {projected_columns} FROM "{schema_name}"."{table_name}"{where_sql}{order_sql} LIMIT %s'
-        params = (*where_params, sample_limit)
+        query, params = self._build_select_query(
+            schema_name=schema_name,
+            table_name=table_name,
+            selected_columns=selected_columns,
+            ordering_columns=ordering_columns,
+            where_sql=where_sql,
+            where_params=where_params,
+            row_limit=row_limit,
+        )
         connection = self._connect(endpoint)
         cursor = connection.cursor()
         try:
@@ -305,6 +359,131 @@ class PostgreSQLExtractionPipelineAdapter:
             {column_names[index]: value for index, value in enumerate(row)}
             for row in rows
         ]
+
+    def _stream_rows_to_jsonl(
+        self,
+        *,
+        endpoint: str,
+        object_id: str,
+        object_name: str,
+        schema_name: str,
+        table_name: str,
+        selected_columns: list[str],
+        ordering_columns: list[str],
+        where_sql: str,
+        where_params: tuple[Any, ...],
+        policies: list[TransformationPolicy],
+    ) -> dict[str, object]:
+        query, params = self._build_select_query(
+            schema_name=schema_name,
+            table_name=table_name,
+            selected_columns=selected_columns,
+            ordering_columns=ordering_columns,
+            where_sql=where_sql,
+            where_params=where_params,
+            row_limit=None,
+        )
+        connection = self._connect(endpoint)
+        cursor = connection.cursor()
+        fd, artifact_path = tempfile.mkstemp(
+            prefix="extraction-artifact-",
+            suffix=".jsonl",
+            dir=self._artifact_dir,
+        )
+        preview_rows: list[dict[str, Any]] = []
+        checksum = hashlib.sha256()
+        file_size_bytes = 0
+        materialized_row_count = 0
+        transformed_columns: set[str] = set()
+        unsupported_types: set[str] = set()
+        transformed_value_count = 0
+        try:
+            cursor.execute(query, params)
+            description = cursor.description or ()
+            column_names = [str(item[0]) for item in description]
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                while True:
+                    batch_rows = cursor.fetchmany(self._STREAM_BATCH_SIZE)
+                    if not batch_rows:
+                        break
+                    mapped_rows = [
+                        {
+                            column_names[index]: value
+                            for index, value in enumerate(row)
+                        }
+                        for row in batch_rows
+                    ]
+                    transformed_batch, batch_summary = self._apply_transformations(
+                        object_id=object_id,
+                        object_name=object_name,
+                        rows=mapped_rows,
+                        policies=policies,
+                    )
+                    transformed_columns.update(
+                        str(value) for value in batch_summary["transformedColumns"]
+                    )
+                    unsupported_types.update(
+                        str(value)
+                        for value in batch_summary["unsupportedTransformationTypes"]
+                    )
+                    transformed_value_count += int(batch_summary["transformedValueCount"])
+                    for row in transformed_batch:
+                        if len(preview_rows) < self._sample_limit:
+                            preview_rows.append(dict(row))
+                        line = json.dumps(row) + "\n"
+                        encoded_line = line.encode("utf-8")
+                        handle.write(line)
+                        checksum.update(encoded_line)
+                        file_size_bytes += len(encoded_line)
+                        materialized_row_count += 1
+        except Exception:
+            os.unlink(artifact_path)
+            raise
+        finally:
+            cursor.close()
+            connection.close()
+
+        return {
+            "artifactPath": artifact_path,
+            "previewRows": preview_rows,
+            "materializedRowCount": materialized_row_count,
+            "fileSizeBytes": file_size_bytes,
+            "checksum": checksum.hexdigest(),
+            "transformationSummary": {
+                "applied": transformed_value_count > 0,
+                "transformedColumns": sorted(transformed_columns),
+                "transformedValueCount": transformed_value_count,
+                "unsupportedTransformationTypes": sorted(unsupported_types),
+            },
+        }
+
+    def _build_select_query(
+        self,
+        *,
+        schema_name: str,
+        table_name: str,
+        selected_columns: list[str],
+        ordering_columns: list[str],
+        where_sql: str,
+        where_params: tuple[Any, ...],
+        row_limit: int | None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        projected_columns = ", ".join(f'"{name}"' for name in selected_columns)
+        order_sql = ""
+        if ordering_columns:
+            order_sql = " ORDER BY " + ", ".join(f'"{name}" ASC' for name in ordering_columns)
+        limit_sql = ""
+        params: tuple[Any, ...]
+        if row_limit is None:
+            params = where_params
+        else:
+            limit_sql = " LIMIT %s"
+            params = (*where_params, row_limit)
+        query = (
+            f'SELECT {projected_columns} FROM "{schema_name}"."{table_name}"'
+            f"{where_sql}{order_sql}{limit_sql}"
+        )
+        return query, params
 
     def _list_table_columns(
         self,

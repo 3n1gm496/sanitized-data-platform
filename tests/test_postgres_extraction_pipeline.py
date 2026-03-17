@@ -4,9 +4,12 @@ import json
 import os
 import tempfile
 
+import pytest
+
 from sanitized_data_platform.adapters.postgres.extraction_pipeline import (
     PostgreSQLExtractionPipelineAdapter,
 )
+from sanitized_data_platform.domain.errors import DomainError
 from sanitized_data_platform.domain.entities import (
     ExtractionJob,
     ExtractionPlan,
@@ -15,11 +18,12 @@ from sanitized_data_platform.domain.entities import (
     TransformationPolicy,
     TraversalRule,
 )
-from sanitized_data_platform.domain.enums import TransformationType
+from sanitized_data_platform.domain.enums import ExtractionArtifactKind, TransformationType
 
 from tests.fakes import (
     InMemoryDataSourceRepository,
     InMemoryTransformationPolicyRepository,
+    StubTokenVault,
     sample_source,
 )
 
@@ -42,10 +46,12 @@ class FakeCursor:
         self._pk_columns = pk_columns
         self._executed = executed
         self._last_query = ""
+        self._row_offset = 0
 
     def execute(self, query: str, params=None) -> None:
         self._executed.append((query, params))
         self._last_query = query
+        self._row_offset = 0
 
     def fetchone(self) -> tuple[object, ...]:
         return (self._row_count,)
@@ -58,6 +64,14 @@ class FakeCursor:
         if "SELECT *" in self._last_query or 'SELECT "' in self._last_query:
             return list(self._sample_rows)
         return []
+
+    def fetchmany(self, size: int) -> list[tuple[object, ...]]:
+        if "SELECT *" not in self._last_query and 'SELECT "' not in self._last_query:
+            return []
+        start = self._row_offset
+        end = min(start + size, len(self._sample_rows))
+        self._row_offset = end
+        return list(self._sample_rows[start:end])
 
     @property
     def description(self):
@@ -121,6 +135,7 @@ def extraction_plan(
     include_related: bool = False,
     criteria: tuple[SelectionCriteria, ...] = (),
     selected_columns: tuple[str, ...] = (),
+    artifact_kind: ExtractionArtifactKind = ExtractionArtifactKind.SAMPLE,
 ) -> ExtractionPlan:
     return ExtractionPlan(
         source_id="source-crm-replica",
@@ -128,6 +143,7 @@ def extraction_plan(
             object_id="table:source-crm-replica:public.customers",
             criteria=criteria,
             selected_columns=selected_columns,
+            artifact_kind=artifact_kind,
         ),
         traversal_rule=TraversalRule(
             include_related=include_related,
@@ -147,12 +163,14 @@ def make_adapter(
     table_columns: tuple[str, ...] = ("customer_id", "email"),
     pk_columns: tuple[str, ...] = ("customer_id",),
     policies: list[TransformationPolicy] | None = None,
+    token_vault=None,
     sample_limit: int = 10,
     artifact_dir: str | None = None,
 ) -> PostgreSQLExtractionPipelineAdapter:
     return PostgreSQLExtractionPipelineAdapter(
         data_sources=InMemoryDataSourceRepository([sample_source()]),
         policies=InMemoryTransformationPolicyRepository(policies or []),
+        token_vault=token_vault,
         sample_limit=sample_limit,
         artifact_dir=artifact_dir,
         connect=lambda _endpoint: FakeConnection(
@@ -179,6 +197,7 @@ def test_postgres_extraction_pipeline_executes_projected_sample_query():
         summary = adapter.execute(job=extraction_job(), plan=extraction_plan())
 
         assert summary["extractionStrategy"] == "postgres-table-root"
+        assert summary["artifactKind"] == "sample"
         assert summary["rootObjectId"] == "table:source-crm-replica:public.customers"
         assert summary["rootTable"] == "public.customers"
         assert summary["selectedColumns"] == ["customer_id", "email"]
@@ -210,6 +229,58 @@ def test_postgres_extraction_pipeline_executes_projected_sample_query():
             'ORDER BY "customer_id" ASC LIMIT %s'
         )
         assert executed[3][1] == (10,)
+
+
+def test_postgres_extraction_pipeline_materializes_full_root_table_rows():
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+    with tempfile.TemporaryDirectory() as artifact_dir:
+        adapter = make_adapter(
+            executed=executed,
+            row_count=3,
+            sample_limit=2,
+            sample_rows=[
+                (1, "a@example.internal"),
+                (2, "b@example.internal"),
+                (3, "c@example.internal"),
+            ],
+            artifact_dir=artifact_dir,
+        )
+
+        summary = adapter.execute(
+            job=extraction_job(),
+            plan=extraction_plan(artifact_kind=ExtractionArtifactKind.FULL),
+        )
+
+        assert summary["artifactKind"] == "full"
+        assert summary["rowCount"] == 3
+        assert summary["rowSampleLimit"] == 2
+        assert summary["rowSampleCount"] == 2
+        assert summary["materializedRowCount"] == 3
+        assert summary["artifactContainsFullResult"] is True
+        assert summary["rowSample"] == [
+            {"customer_id": 1, "email": "a@example.internal"},
+            {"customer_id": 2, "email": "b@example.internal"},
+        ]
+        assert summary["notes"] == [
+            "Full extraction artifact contains all matching rows; inline rowSample is a bounded preview only."
+        ]
+        assert executed[3][0] == (
+            'SELECT "customer_id", "email" FROM "public"."customers" '
+            'ORDER BY "customer_id" ASC'
+        )
+        assert executed[3][1] == ()
+        with open(summary["artifactPath"], encoding="utf-8") as artifact_file:
+            lines = [json.loads(line) for line in artifact_file if line.strip()]
+        with open(summary["artifactPath"], "rb") as artifact_file:
+            artifact_bytes = artifact_file.read()
+        assert lines == [
+            {"customer_id": 1, "email": "a@example.internal"},
+            {"customer_id": 2, "email": "b@example.internal"},
+            {"customer_id": 3, "email": "c@example.internal"},
+        ]
+        assert summary["artifactFileSizeBytes"] == os.path.getsize(summary["artifactPath"])
+        assert summary["artifactChecksum"] == hashlib.sha256(artifact_bytes).hexdigest()
+        assert summary["artifactColumnCount"] == 2
 
 
 def test_postgres_extraction_pipeline_uses_narrowed_selected_columns_projection():
@@ -479,6 +550,67 @@ def test_postgres_extraction_pipeline_applies_deterministic_pseudonymization_rep
         assert summary["transformationsApplied"] is True
         assert summary["transformedColumns"] == ["email"]
         assert summary["transformedValueCount"] == 3
+
+
+def test_postgres_extraction_pipeline_applies_reversible_tokenization_with_token_vault():
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+    policy = TransformationPolicy(
+        policy_id="policy-tokenize-email",
+        system_id="crm",
+        system_name="CRM",
+        object_name="public.customers",
+        column_name="email",
+        sensitivity_tag="pii.email",
+        transformation_type=TransformationType.REVERSIBLE_TOKENIZATION,
+        reversible=True,
+        tokenization_domain_id="customer-email",
+    )
+    with tempfile.TemporaryDirectory() as artifact_dir:
+        adapter = make_adapter(
+            executed=executed,
+            row_count=2,
+            sample_rows=[(1, "a@example.internal"), (2, "b@example.internal")],
+            policies=[policy],
+            token_vault=StubTokenVault(),
+            artifact_dir=artifact_dir,
+        )
+
+        summary = adapter.execute(job=extraction_job(), plan=extraction_plan())
+
+        assert summary["transformationsApplied"] is True
+        assert summary["unsupportedTransformationTypes"] == []
+        assert summary["rowSample"] == [
+            {"customer_id": 1, "email": "tok::customer-email::a@example.internal"},
+            {"customer_id": 2, "email": "tok::customer-email::b@example.internal"},
+        ]
+
+
+def test_postgres_extraction_pipeline_rejects_reversible_tokenization_without_token_vault():
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+    policy = TransformationPolicy(
+        policy_id="policy-tokenize-email",
+        system_id="crm",
+        system_name="CRM",
+        object_name="public.customers",
+        column_name="email",
+        sensitivity_tag="pii.email",
+        transformation_type=TransformationType.REVERSIBLE_TOKENIZATION,
+        reversible=True,
+        tokenization_domain_id="customer-email",
+    )
+    with tempfile.TemporaryDirectory() as artifact_dir:
+        adapter = make_adapter(
+            executed=executed,
+            row_count=1,
+            sample_rows=[(1, "a@example.internal")],
+            policies=[policy],
+            artifact_dir=artifact_dir,
+        )
+
+        with pytest.raises(DomainError) as exc:
+            adapter.execute(job=extraction_job(), plan=extraction_plan())
+
+        assert str(exc.value) == "Reversible tokenization requires a configured token vault service."
 
 
 def test_postgres_extraction_pipeline_supports_coexisting_masking_hashing_and_pseudonymization():

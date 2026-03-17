@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections import deque
 from datetime import timedelta
 import hashlib
+import os
 
 from sanitized_data_platform.domain.entities import (
+    ArtifactPublishJob,
     AuditEvent,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
@@ -33,6 +35,7 @@ from sanitized_data_platform.domain.enums import (
     ClassificationStatus,
     EnvironmentType,
     ExtractionArtifactStatus,
+    ExtractionArtifactKind,
     ExtractionJobStatus,
     MetadataObjectType,
     PolicyCoverageSeverity,
@@ -41,6 +44,8 @@ from sanitized_data_platform.domain.enums import (
 )
 
 from .dto import (
+    ArtifactPublishJobView,
+    AuditEventView,
     BaselineDetailView,
     BaselineEligibilityView,
     BaselineListItemView,
@@ -49,6 +54,7 @@ from .dto import (
     BaselineRefreshJobView,
     ClassificationListingView,
     ClassificationView,
+    CreateArtifactPublishJobCommand,
     CreateExtractionJobCommand,
     ExtractionArtifactView,
     GovernanceObjectSummaryView,
@@ -76,6 +82,8 @@ from .dto import (
     RefreshScheduleView,
 )
 from .ports import (
+    ArtifactPublishJobRepository,
+    ArtifactPublishQueuePort,
     AuditEventRepository,
     BaselineRepository,
     BaselineRefreshJobRepository,
@@ -100,6 +108,7 @@ from .ports import (
     SourceMetadataDiscoveryPort,
     SystemRepository,
     TargetEnvironmentRepository,
+    TokenVaultPort,
     TransformationPolicyRepository,
     ValidationRepository,
 )
@@ -188,6 +197,9 @@ class RowTransformationService:
     _DIGITS = "0123456789"
     _UNSUPPORTED = object()
 
+    def __init__(self, token_vault: TokenVaultPort | None = None) -> None:
+        self._token_vault = token_vault
+
     def apply_to_rows(
         self,
         *,
@@ -269,6 +281,18 @@ class RowTransformationService:
             if value is None:
                 return value
             return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+        if policy.transformation_type == TransformationType.REVERSIBLE_TOKENIZATION:
+            if value is None:
+                return value
+            if self._token_vault is None:
+                raise DomainError(
+                    "Reversible tokenization requires a configured token vault service."
+                )
+            assert policy.tokenization_domain_id is not None
+            return self._token_vault.tokenize(
+                domain_id=policy.tokenization_domain_id,
+                value=value,
+            )
         return self._UNSUPPORTED
 
     def _policy_matches_target(
@@ -669,6 +693,7 @@ class ExtractionPlanningService:
         root_object_id: str,
         criteria: list[SelectionCriteria] | None = None,
         selected_columns: list[str] | None = None,
+        artifact_kind: ExtractionArtifactKind = ExtractionArtifactKind.SAMPLE,
         include_related: bool = False,
         max_depth: int = 1,
     ) -> ExtractionPlan:
@@ -717,6 +742,7 @@ class ExtractionPlanningService:
                 object_id=root_object_id,
                 criteria=tuple(criteria or ()),
                 selected_columns=tuple(validated_selected_columns),
+                artifact_kind=artifact_kind,
             ),
             traversal_rule=traversal_rule,
             selected_object_ids=tuple(sorted(selected_object_ids)),
@@ -823,6 +849,7 @@ class ExtractionPlanPreviewService:
         self,
         command: PreviewExtractionPlanCommand,
     ) -> ExtractionPlanPreviewView:
+        artifact_kind = self._parse_artifact_kind(command.artifact_kind)
         criteria = [
             SelectionCriteria(
                 field_name=item["fieldName"],
@@ -836,10 +863,18 @@ class ExtractionPlanPreviewService:
             root_object_id=command.root_object_id,
             criteria=criteria,
             selected_columns=command.selected_columns,
+            artifact_kind=artifact_kind,
             include_related=command.include_related,
             max_depth=command.max_depth,
         )
         return ExtractionPlanPreviewView.from_plan(plan)
+
+    @staticmethod
+    def _parse_artifact_kind(value: str) -> ExtractionArtifactKind:
+        try:
+            return ExtractionArtifactKind(value)
+        except ValueError as exc:
+            raise DomainError(f"Unsupported extraction artifact kind: {value}") from exc
 
 
 class ExtractionJobRequestService:
@@ -868,6 +903,12 @@ class ExtractionJobRequestService:
         source = self._data_sources.get_by_id(command.source_id)
         if source is None or not source.active:
             raise DomainError(f"Unknown or inactive data source: {command.source_id}")
+        try:
+            artifact_kind = ExtractionArtifactKind(command.artifact_kind)
+        except ValueError as exc:
+            raise DomainError(
+                f"Unsupported extraction artifact kind: {command.artifact_kind}"
+            ) from exc
 
         criteria = tuple(
             SelectionCriteria(
@@ -882,6 +923,7 @@ class ExtractionJobRequestService:
             root_object_id=command.root_object_id,
             criteria=list(criteria),
             selected_columns=command.selected_columns,
+            artifact_kind=artifact_kind,
             include_related=command.include_related,
             max_depth=command.max_depth,
         )
@@ -919,6 +961,7 @@ class ExtractionJobRequestService:
                     "sourceId": command.source_id,
                     "rootObjectId": command.root_object_id,
                     "selectedColumnCount": len(plan.root.selected_columns),
+                    "artifactKind": plan.root.artifact_kind.value,
                     "planSnapshotId": plan_snapshot.snapshot_id,
                     "selectedObjectCount": len(plan.selected_object_ids),
                     "selectedRelationshipCount": len(plan.selected_relationship_ids),
@@ -988,6 +1031,15 @@ class ExtractionArtifactQueryService:
             artifact = self._artifacts.get_by_job_id(job_id)
         if artifact is None:
             raise DomainError(f"No extraction artifact available for job: {job_id}")
+        return self._to_view(artifact)
+
+    def get_artifact_by_id(self, artifact_id: str) -> ExtractionArtifactView:
+        artifact = self._artifacts.get_by_id(artifact_id)
+        if artifact is None:
+            raise DomainError(f"Unknown extraction artifact: {artifact_id}")
+        return self._to_view(artifact)
+
+    def _to_view(self, artifact: ExtractionArtifact) -> ExtractionArtifactView:
         artifact = self._lifecycle.evaluate_availability(artifact)
         return ExtractionArtifactView.from_artifact(artifact)
 
@@ -1048,6 +1100,44 @@ class ExtractionArtifactLifecycleService:
                 self._artifacts.save(artifact.expire(expired_at=artifact.expires_at))
                 expired_count += 1
         return expired_count
+
+
+class ExtractionArtifactCleanupService:
+    def __init__(
+        self,
+        *,
+        artifacts: ExtractionArtifactRepository,
+        clock: ClockPort,
+    ) -> None:
+        self._artifacts = artifacts
+        self._clock = clock
+
+    def cleanup_expired_artifacts(self) -> dict[str, int]:
+        evaluated_count = 0
+        deleted_count = 0
+        missing_file_count = 0
+        failed_count = 0
+        for artifact in self._artifacts.list_all():
+            if artifact.status != ExtractionArtifactStatus.EXPIRED:
+                continue
+            evaluated_count += 1
+            try:
+                if os.path.exists(artifact.artifact_path):
+                    os.remove(artifact.artifact_path)
+                else:
+                    missing_file_count += 1
+                self._artifacts.save(
+                    artifact.mark_deleted(deleted_at=self._clock.now())
+                )
+                deleted_count += 1
+            except OSError:
+                failed_count += 1
+        return {
+            "evaluatedArtifactCount": evaluated_count,
+            "deletedArtifactCount": deleted_count,
+            "missingFileCount": missing_file_count,
+            "failedArtifactCount": failed_count,
+        }
 
 
 class MetadataDiscoveryService:
@@ -2143,6 +2233,74 @@ class LineageRecordingService:
                 )
             )
 
+    def record_artifact_publish_completion(
+        self,
+        *,
+        job: ArtifactPublishJob,
+        artifact: ExtractionArtifact,
+    ) -> None:
+        created_at = self._clock.now()
+        self._lineage.add(
+            LineageRecord(
+                record_id=self._ids.new_id("lineage"),
+                source_type="extraction_artifact",
+                source_id=artifact.artifact_id,
+                target_type="artifact_publish_job",
+                target_id=job.job_id,
+                event_type="artifact_publish_from_extraction_artifact",
+                created_at=created_at,
+                details={
+                    "rootObjectId": artifact.root_object_id,
+                    "artifactKind": artifact.kind.value,
+                    "artifactFormat": artifact.artifact_format.value,
+                },
+            )
+        )
+        target_details: dict[str, object] = {
+            "sourceId": job.source_id,
+            "rootObjectId": job.root_object_id,
+        }
+        target_table = job.execution_summary.get("targetTable")
+        if isinstance(target_table, str):
+            target_details["targetTable"] = target_table
+        self._lineage.add(
+            LineageRecord(
+                record_id=self._ids.new_id("lineage"),
+                source_type="artifact_publish_job",
+                source_id=job.job_id,
+                target_type="target_environment",
+                target_id=job.target_environment_id,
+                event_type="artifact_publish_delivered_to_target_environment",
+                created_at=created_at,
+                details=target_details,
+            )
+        )
+
+    def record_extraction_artifact_materialization(
+        self,
+        *,
+        job: ExtractionJob,
+        artifact: ExtractionArtifact,
+    ) -> None:
+        created_at = self._clock.now()
+        self._lineage.add(
+            LineageRecord(
+                record_id=self._ids.new_id("lineage"),
+                source_type="extraction_job",
+                source_id=job.job_id,
+                target_type="extraction_artifact",
+                target_id=artifact.artifact_id,
+                event_type="extraction_materialized_artifact",
+                created_at=created_at,
+                details={
+                    "artifactKind": artifact.kind.value,
+                    "artifactFormat": artifact.artifact_format.value,
+                    "rowCount": artifact.row_count,
+                    "rootObjectId": artifact.root_object_id,
+                },
+            )
+        )
+
 
 class LineageQueryService:
     def __init__(self, lineage: LineageRepository) -> None:
@@ -2169,6 +2327,22 @@ class LineageQueryService:
         return LineageView(
             subject_type="extraction_job",
             subject_id=job_id,
+            items=[LineageRecordView.from_record(record) for record in records],
+        )
+
+    def get_artifact_publish_job_lineage(self, job_id: str) -> LineageView:
+        records = self._list_related("artifact_publish_job", job_id)
+        return LineageView(
+            subject_type="artifact_publish_job",
+            subject_id=job_id,
+            items=[LineageRecordView.from_record(record) for record in records],
+        )
+
+    def get_extraction_artifact_lineage(self, artifact_id: str) -> LineageView:
+        records = self._list_related("extraction_artifact", artifact_id)
+        return LineageView(
+            subject_type="extraction_artifact",
+            subject_id=artifact_id,
             items=[LineageRecordView.from_record(record) for record in records],
         )
 
@@ -2312,6 +2486,111 @@ class PublishRequestService:
         return profile
 
 
+class ArtifactPublishRequestService:
+    def __init__(
+        self,
+        *,
+        artifacts: ExtractionArtifactRepository,
+        environments: TargetEnvironmentRepository,
+        jobs: ArtifactPublishJobRepository,
+        audits: AuditEventRepository,
+        queue: ArtifactPublishQueuePort,
+        clock: ClockPort,
+        ids: IdGeneratorPort,
+    ) -> None:
+        self._artifacts = artifacts
+        self._environments = environments
+        self._jobs = jobs
+        self._audits = audits
+        self._queue = queue
+        self._clock = clock
+        self._ids = ids
+        self._artifact_lifecycle = ExtractionArtifactLifecycleService(
+            artifacts=artifacts,
+            clock=clock,
+        )
+
+    def create_job(self, command: CreateArtifactPublishJobCommand) -> ArtifactPublishJobView:
+        artifact = self._require_available_artifact(command.extraction_artifact_id)
+        target = self._require_active_target(command.target_environment_id)
+        if not artifact.root_object_id.startswith("table:"):
+            raise DomainError(
+                "Artifact publish currently supports only root-table extraction artifacts."
+            )
+
+        now = self._clock.now()
+        job = ArtifactPublishJob.create(
+            job_id=self._ids.new_id("artifact-publish-job"),
+            extraction_artifact_id=artifact.artifact_id,
+            source_id=artifact.source_id,
+            root_object_id=artifact.root_object_id,
+            target_environment_id=target.environment_id,
+            requested_by=command.requested_by,
+            created_at=now,
+        )
+        self._jobs.add(job)
+        self._queue.enqueue(job.job_id)
+        self._audits.add(
+            AuditEvent(
+                event_id=self._ids.new_id("audit"),
+                event_type="artifact_publish_job_requested",
+                actor=command.requested_by,
+                subject_type="artifact_publish_job",
+                subject_id=job.job_id,
+                details={
+                    "extractionArtifactId": artifact.artifact_id,
+                    "sourceId": artifact.source_id,
+                    "rootObjectId": artifact.root_object_id,
+                    "targetEnvironmentId": target.environment_id,
+                },
+                created_at=now,
+            )
+        )
+        return ArtifactPublishJobView.from_job(job)
+
+    def get_job(self, job_id: str) -> ArtifactPublishJobView:
+        job = self._jobs.get_by_id(job_id)
+        if job is None:
+            raise DomainError(f"Unknown artifact publish job: {job_id}")
+        return ArtifactPublishJobView.from_job(job)
+
+    def _require_available_artifact(self, artifact_id: str) -> ExtractionArtifact:
+        artifact = self._artifacts.get_by_id(artifact_id)
+        if artifact is None:
+            raise DomainError(f"Unknown extraction artifact: {artifact_id}")
+        artifact = self._artifact_lifecycle.evaluate_availability(artifact)
+        if not artifact.is_available:
+            raise DomainError(
+                f"Extraction artifact is not available for publish: {artifact_id}"
+            )
+        return artifact
+
+    def _require_active_target(self, environment_id: str):
+        target = self._environments.get_by_id(environment_id)
+        if target is None or not target.active:
+            raise DomainError(f"Unknown or inactive target environment: {environment_id}")
+        return target
+
+
+class ArtifactPublishMonitoringService:
+    def __init__(self, jobs: ArtifactPublishJobRepository) -> None:
+        self._jobs = jobs
+
+    def list_jobs(self) -> list[ArtifactPublishJobView]:
+        jobs = sorted(
+            self._jobs.list_all(),
+            key=lambda job: job.created_at,
+            reverse=True,
+        )
+        return [ArtifactPublishJobView.from_job(job) for job in jobs]
+
+    def get_job(self, job_id: str) -> ArtifactPublishJobView:
+        job = self._jobs.get_by_id(job_id)
+        if job is None:
+            raise DomainError(f"Unknown artifact publish job: {job_id}")
+        return ArtifactPublishJobView.from_job(job)
+
+
 class JobMonitoringService:
     def __init__(
         self,
@@ -2329,3 +2608,15 @@ class JobMonitoringService:
 
     def list_audit_events(self, subject_id: str):
         return self._audits.list_for_subject(subject_id)
+
+
+class AuditQueryService:
+    def __init__(self, audits: AuditEventRepository) -> None:
+        self._audits = audits
+
+    def list_events_for_subject(self, subject_id: str) -> list[AuditEventView]:
+        events = sorted(
+            self._audits.list_for_subject(subject_id),
+            key=lambda event: event.created_at,
+        )
+        return [AuditEventView.from_event(event) for event in events]

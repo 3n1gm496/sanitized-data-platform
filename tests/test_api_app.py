@@ -1,4 +1,7 @@
 from sanitized_data_platform.application.services import (
+    ArtifactPublishMonitoringService,
+    ArtifactPublishRequestService,
+    AuditQueryService,
     BaselineEligibilityExplanationService,
     BaselineQueryService,
     BaselineRefreshMonitoringService,
@@ -26,6 +29,8 @@ from sanitized_data_platform.application.services import (
 )
 from sanitized_data_platform.interfaces.api.app import ApiApp
 from sanitized_data_platform.domain.entities import (
+    ArtifactPublishJob,
+    AuditEvent,
     ExtractionArtifact,
     ExtractionJob,
     LineageRecord,
@@ -43,6 +48,8 @@ from sanitized_data_platform.domain.enums import (
 from tests.fakes import (
     AllowAllPolicy,
     FakeClock,
+    InMemoryArtifactPublishJobRepository,
+    InMemoryArtifactPublishQueue,
     InMemoryAuditEventRepository,
     InMemoryBaselineRepository,
     InMemoryBaselineRefreshJobRepository,
@@ -72,6 +79,7 @@ from tests.fakes import (
     build_readiness_service,
     sample_baseline,
     sample_classification_tags,
+    sample_extraction_artifact,
     sample_metadata_objects,
     sample_profile,
     sample_relationships,
@@ -161,6 +169,8 @@ def build_api(
     refresh_schedule_repo = InMemoryBaselineRefreshScheduleRepository()
     extraction_job_repo = InMemoryExtractionJobRepository()
     extraction_artifact_repo = InMemoryExtractionArtifactRepository()
+    artifact_publish_job_repo = InMemoryArtifactPublishJobRepository()
+    artifact_publish_queue = InMemoryArtifactPublishQueue()
     extraction_snapshot_repo = InMemoryExtractionPlanSnapshotRepository()
     extraction_queue = InMemoryExtractionQueue()
     job_repo = InMemoryPublishJobRepository()
@@ -196,6 +206,29 @@ def build_api(
             file_size_bytes=256,
             checksum="api-artifact-checksum",
             column_count=2,
+        )
+    )
+    artifact_publish_job_repo.add(
+        ArtifactPublishJob.create(
+            job_id="artifact-publish-job-1",
+            extraction_artifact_id="extraction-artifact-1",
+            source_id="source-crm-replica",
+            root_object_id="table:source-crm-replica:public.customers",
+            target_environment_id="env-dev",
+            requested_by="developer@example.internal",
+            created_at=clock.now(),
+        )
+    )
+    extraction_artifact_repo.add(sample_extraction_artifact())
+    audit_repo.add(
+        AuditEvent(
+            event_id="audit-artifact-1",
+            event_type="extraction_artifact_expired",
+            actor="system",
+            subject_type="extraction_artifact",
+            subject_id="extraction-artifact-1",
+            details={"runId": "artifact-retention-run-1"},
+            created_at=clock.now(),
         )
     )
     lineage_repo.add(
@@ -244,6 +277,42 @@ def build_api(
             event_type="extraction_root_selected",
             created_at=clock.now(),
             details={"includeRelated": True, "maxDepth": 1},
+        )
+    )
+    lineage_repo.add(
+        LineageRecord(
+            record_id="lineage-5",
+            source_type="extraction_job",
+            source_id="extraction-1",
+            target_type="extraction_artifact",
+            target_id="extraction-artifact-1",
+            event_type="extraction_materialized_artifact",
+            created_at=clock.now(),
+            details={"artifactKind": "full"},
+        )
+    )
+    lineage_repo.add(
+        LineageRecord(
+            record_id="lineage-6",
+            source_type="extraction_artifact",
+            source_id="extraction-artifact-1",
+            target_type="artifact_publish_job",
+            target_id="artifact-publish-job-1",
+            event_type="artifact_publish_from_extraction_artifact",
+            created_at=clock.now(),
+            details={"rootObjectId": "table:source-crm-replica:public.customers"},
+        )
+    )
+    lineage_repo.add(
+        LineageRecord(
+            record_id="lineage-7",
+            source_type="artifact_publish_job",
+            source_id="artifact-publish-job-1",
+            target_type="target_environment",
+            target_id="env-dev",
+            event_type="artifact_publish_delivered_to_target_environment",
+            created_at=clock.now(),
+            details={"targetTable": "public.customers"},
         )
     )
 
@@ -371,6 +440,19 @@ def build_api(
         ),
     )
     extraction_plan_snapshots = ExtractionPlanSnapshotQueryService(extraction_snapshot_repo)
+    artifact_publish_requests = ArtifactPublishRequestService(
+        artifacts=extraction_artifact_repo,
+        environments=target_repo,
+        jobs=artifact_publish_job_repo,
+        audits=audit_repo,
+        queue=artifact_publish_queue,
+        clock=clock,
+        ids=ids,
+    )
+    artifact_publish_monitoring = ArtifactPublishMonitoringService(
+        artifact_publish_job_repo
+    )
+    audit_queries = AuditQueryService(audit_repo)
     governance_summary_queries = GovernanceSummaryQueryService(
         systems=system_repo,
         data_sources=source_repo,
@@ -383,6 +465,9 @@ def build_api(
         coverage=coverage,
     )
     return ApiApp(
+        artifact_publish_monitoring=artifact_publish_monitoring,
+        artifact_publish_requests=artifact_publish_requests,
+        audit_queries=audit_queries,
         baselines=baseline_queries,
         baseline_refresh_monitoring=baseline_refresh_monitoring,
         baseline_refresh_requests=baseline_refresh_requests,
@@ -429,6 +514,31 @@ def test_api_lists_systems_and_creates_job():
     assert create_response.body["baseline_validation_summary"]["status"] == "passed"
 
 
+def test_api_exposes_publish_job_audit_events():
+    app = build_api()
+    create_response = app.handle(
+        "POST",
+        "/api/v1/jobs",
+        body={
+            "sourceId": "source-crm-replica",
+            "targetEnvironmentId": "env-dev",
+            "datasetProfileId": "profile-full-sanitized",
+            "requestedBy": "developer@example.internal",
+        },
+    )
+
+    response = app.handle(
+        "GET",
+        f"/api/v1/jobs/{create_response.body['job_id']}/audit-events",
+    )
+
+    assert response.status_code == 200
+    assert [item["event_type"] for item in response.body] == [
+        "publish_job_requested"
+    ]
+    assert response.body[0]["subject_type"] == "publish_job"
+
+
 def test_api_previews_root_only_extraction_plan():
     app = build_api()
 
@@ -448,6 +558,7 @@ def test_api_previews_root_only_extraction_plan():
 
     assert response.status_code == 200
     assert response.body["root_object_id"] == "table-customers"
+    assert response.body["artifact_kind"] == "sample"
     assert response.body["criteria"][0]["field_name"] == "customer_id"
     assert response.body["selected_object_ids"] == ["table-customers"]
     assert response.body["selected_relationship_ids"] == []
@@ -470,8 +581,28 @@ def test_api_previews_extraction_plan_with_selected_columns():
 
     assert response.status_code == 200
     assert response.body["root_object_id"] == "table-customers"
+    assert response.body["artifact_kind"] == "sample"
     assert response.body["selected_columns"] == ["customer_id"]
     assert response.body["selected_object_ids"] == ["table-customers"]
+
+
+def test_api_previews_full_artifact_kind_extraction_plan():
+    app = build_api()
+
+    response = app.handle(
+        "POST",
+        "/api/v1/extraction-plans/preview",
+        body={
+            "sourceId": "source-crm-replica",
+            "rootObjectId": "table-customers",
+            "artifactKind": "full",
+            "includeRelated": False,
+            "maxDepth": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.body["artifact_kind"] == "full"
 
 
 def test_api_previews_fk_expanded_extraction_plan():
@@ -525,6 +656,108 @@ def test_api_creates_and_lists_extraction_jobs():
     assert list_response.body[0]["job_id"] == create_response.body["job_id"]
     assert detail_response.status_code == 200
     assert detail_response.body["root_object_id"] == "table-customers"
+
+
+def test_api_creates_and_lists_artifact_publish_jobs():
+    app = build_api()
+
+    create_response = app.handle(
+        "POST",
+        "/api/v1/artifact-publish-jobs",
+        body={
+            "extractionArtifactId": "extraction-artifact-1",
+            "targetEnvironmentId": "env-dev",
+            "requestedBy": "developer@example.internal",
+        },
+    )
+    list_response = app.handle("GET", "/api/v1/artifact-publish-jobs")
+    detail_response = app.handle(
+        "GET",
+        f"/api/v1/artifact-publish-jobs/{create_response.body['job_id']}",
+    )
+
+    assert create_response.status_code == 202
+    assert create_response.body["status"] == "pending"
+    assert create_response.body["extraction_artifact_id"] == "extraction-artifact-1"
+    assert create_response.body["target_environment_id"] == "env-dev"
+    assert list_response.status_code == 200
+    assert list_response.body[0]["job_id"] == create_response.body["job_id"]
+    assert detail_response.status_code == 200
+    assert detail_response.body["root_object_id"] == "table:source-crm-replica:public.customers"
+
+
+def test_api_reads_single_artifact_publish_job():
+    app = build_api()
+    create_response = app.handle(
+        "POST",
+        "/api/v1/artifact-publish-jobs",
+        body={
+            "extractionArtifactId": "extraction-artifact-1",
+            "targetEnvironmentId": "env-dev",
+            "requestedBy": "developer@example.internal",
+        },
+    )
+
+    response = app.handle(
+        "GET",
+        f"/api/v1/artifact-publish-jobs/{create_response.body['job_id']}",
+    )
+
+    assert response.status_code == 200
+    assert response.body["job_id"] == create_response.body["job_id"]
+    assert response.body["source_id"] == "source-crm-replica"
+    assert response.body["execution_summary"] == {}
+
+
+def test_api_exposes_artifact_publish_job_audit_events():
+    app = build_api()
+    create_response = app.handle(
+        "POST",
+        "/api/v1/artifact-publish-jobs",
+        body={
+            "extractionArtifactId": "extraction-artifact-1",
+            "targetEnvironmentId": "env-dev",
+            "requestedBy": "developer@example.internal",
+        },
+    )
+
+    response = app.handle(
+        "GET",
+        f"/api/v1/artifact-publish-jobs/{create_response.body['job_id']}/audit-events",
+    )
+
+    assert response.status_code == 200
+    assert [item["event_type"] for item in response.body] == [
+        "artifact_publish_job_requested"
+    ]
+    assert response.body[0]["subject_type"] == "artifact_publish_job"
+
+
+def test_api_exposes_extraction_job_audit_events():
+    app = build_api()
+    create_response = app.handle(
+        "POST",
+        "/api/v1/extraction-jobs",
+        body={
+            "sourceId": "source-crm-replica",
+            "rootObjectId": "table-customers",
+            "criteria": [],
+            "includeRelated": False,
+            "maxDepth": 1,
+            "requestedBy": "developer@example.internal",
+        },
+    )
+
+    response = app.handle(
+        "GET",
+        f"/api/v1/extraction-jobs/{create_response.body['job_id']}/audit-events",
+    )
+
+    assert response.status_code == 200
+    assert [item["event_type"] for item in response.body] == [
+        "extraction_job_requested"
+    ]
+    assert response.body[0]["subject_type"] == "extraction_job"
 
 
 def test_api_exposes_extraction_job_artifact():
@@ -789,6 +1022,31 @@ def test_api_exposes_baseline_refresh_job_lifecycle_views():
     assert detail_response.body["system_id"] == "crm"
 
 
+def test_api_exposes_baseline_refresh_job_audit_events():
+    app = build_api()
+
+    create_response = app.handle(
+        "POST",
+        "/api/v1/baseline-refresh-jobs",
+        body={
+            "systemId": "crm",
+            "datasetProfileId": "profile-full-sanitized",
+            "targetEnvironmentType": "dev",
+            "requestedBy": "steward@example.internal",
+        },
+    )
+    response = app.handle(
+        "GET",
+        f"/api/v1/baseline-refresh-jobs/{create_response.body['job_id']}/audit-events",
+    )
+
+    assert response.status_code == 200
+    assert [item["event_type"] for item in response.body] == [
+        "baseline_refresh_requested"
+    ]
+    assert response.body[0]["subject_type"] == "baseline_refresh_job"
+
+
 def test_api_creates_and_lists_refresh_schedules():
     app = build_api()
 
@@ -846,4 +1104,68 @@ def test_api_exposes_extraction_job_lineage():
     assert [item["event_type"] for item in response.body["items"]] == [
         "extraction_from_source",
         "extraction_root_selected",
+        "extraction_materialized_artifact",
+    ]
+
+
+def test_api_reads_extraction_artifact_by_id():
+    app = build_api()
+
+    response = app.handle(
+        "GET",
+        "/api/v1/extraction-artifacts/extraction-artifact-1",
+    )
+
+    assert response.status_code == 200
+    assert response.body["artifact_id"] == "extraction-artifact-1"
+    assert response.body["kind"] == "full"
+    assert response.body["artifact_format"] == "jsonl"
+
+
+def test_api_exposes_extraction_artifact_audit_events():
+    app = build_api()
+
+    response = app.handle(
+        "GET",
+        "/api/v1/extraction-artifacts/extraction-artifact-1/audit-events",
+    )
+
+    assert response.status_code == 200
+    assert [item["event_type"] for item in response.body] == [
+        "extraction_artifact_expired"
+    ]
+    assert response.body[0]["subject_type"] == "extraction_artifact"
+
+
+def test_api_exposes_extraction_artifact_lineage():
+    app = build_api()
+
+    response = app.handle(
+        "GET",
+        "/api/v1/extraction-artifacts/extraction-artifact-1/lineage",
+    )
+
+    assert response.status_code == 200
+    assert response.body["subject_type"] == "extraction_artifact"
+    assert response.body["subject_id"] == "extraction-artifact-1"
+    assert [item["event_type"] for item in response.body["items"]] == [
+        "extraction_materialized_artifact",
+        "artifact_publish_from_extraction_artifact",
+    ]
+
+
+def test_api_exposes_artifact_publish_job_lineage():
+    app = build_api()
+
+    response = app.handle(
+        "GET",
+        "/api/v1/artifact-publish-jobs/artifact-publish-job-1/lineage",
+    )
+
+    assert response.status_code == 200
+    assert response.body["subject_type"] == "artifact_publish_job"
+    assert response.body["subject_id"] == "artifact-publish-job-1"
+    assert [item["event_type"] for item in response.body["items"]] == [
+        "artifact_publish_from_extraction_artifact",
+        "artifact_publish_delivered_to_target_environment",
     ]
