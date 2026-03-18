@@ -41,6 +41,22 @@ class SystemSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class EngineCapabilityView:
+    engine_type: str
+    metadata_discovery_supported: bool
+    extraction_supported: bool
+    artifact_publish_supported: bool
+    baseline_refresh_supported: bool
+    baseline_publish_supported: bool
+    release_ready: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EngineCapabilityListingView:
+    items: list[EngineCapabilityView]
+
+
+@dataclass(frozen=True, slots=True)
 class CreatePublishJobCommand:
     source_id: str
     target_environment_id: str

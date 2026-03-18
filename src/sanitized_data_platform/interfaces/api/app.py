@@ -19,6 +19,7 @@ from sanitized_data_platform.application.services import (
     BaselineRefreshRequestService,
     CatalogQueryService,
     ClassificationQueryService,
+    EngineCapabilityQueryService,
     ExtractionJobMonitoringService,
     ExtractionJobRequestService,
     ExtractionArtifactQueryService,
@@ -58,6 +59,7 @@ class ApiApp:
         baseline_refresh_requests: BaselineRefreshRequestService,
         catalog: CatalogQueryService,
         classification_queries: ClassificationQueryService,
+        engine_capabilities: EngineCapabilityQueryService,
         extraction_job_monitoring: ExtractionJobMonitoringService,
         extraction_job_requests: ExtractionJobRequestService,
         extraction_artifacts: ExtractionArtifactQueryService,
@@ -82,6 +84,7 @@ class ApiApp:
         self._baseline_refresh_requests = baseline_refresh_requests
         self._catalog = catalog
         self._classification_queries = classification_queries
+        self._engine_capabilities = engine_capabilities
         self._extraction_job_monitoring = extraction_job_monitoring
         self._extraction_job_requests = extraction_job_requests
         self._extraction_artifacts = extraction_artifacts
@@ -127,6 +130,15 @@ class ApiApp:
                     status_code=200,
                     body=[asdict(profile) for profile in profiles],
                 )
+
+            if method == "GET" and path == "/api/v1/engine-capabilities":
+                capabilities = self._engine_capabilities.list_engine_capabilities()
+                return ApiResponse(status_code=200, body=asdict(capabilities))
+
+            if method == "GET" and path.startswith("/api/v1/engine-capabilities/"):
+                engine_type = path.removeprefix("/api/v1/engine-capabilities/")
+                capability = self._engine_capabilities.get_engine_capability(engine_type)
+                return ApiResponse(status_code=200, body=asdict(capability))
 
             if method == "POST" and path == "/api/v1/extraction-plans/preview":
                 command = PreviewExtractionPlanCommand(

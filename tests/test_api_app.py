@@ -8,6 +8,7 @@ from sanitized_data_platform.application.services import (
     BaselineRefreshRequestService,
     CatalogQueryService,
     ClassificationQueryService,
+    EngineCapabilityQueryService,
     ExtractionJobMonitoringService,
     ExtractionJobRequestService,
     ExtractionArtifactQueryService,
@@ -27,6 +28,7 @@ from sanitized_data_platform.application.services import (
     RefreshScheduleService,
     ValidationQueryService,
 )
+from sanitized_data_platform.adapters.registry import AdapterRegistry
 from sanitized_data_platform.interfaces.api.app import ApiApp
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
@@ -39,6 +41,7 @@ from sanitized_data_platform.domain.entities import (
     TransformationPolicy,
 )
 from sanitized_data_platform.domain.enums import (
+    DatabaseEngine,
     ExtractionArtifactFormat,
     ExtractionArtifactKind,
     MetadataObjectType,
@@ -320,6 +323,24 @@ def build_api(
     )
 
     catalog = CatalogQueryService(system_repo, source_repo, target_repo, profile_repo)
+    adapter_registry = AdapterRegistry()
+    adapter_registry.register(
+        engine_type=DatabaseEngine.POSTGRES,
+        metadata_discovery=object(),
+        extraction_pipeline=object(),
+        artifact_publish_pipeline=object(),
+        baseline_refresh_pipeline=object(),
+        baseline_publish_pipeline=object(),
+    )
+    adapter_registry.register(
+        engine_type=DatabaseEngine.ORACLE,
+        metadata_discovery=object(),
+        extraction_pipeline=object(),
+        artifact_publish_pipeline=object(),
+        baseline_refresh_pipeline=object(),
+        baseline_publish_pipeline=object(),
+    )
+    engine_capabilities = EngineCapabilityQueryService(adapter_registry)
     coverage = PolicyCoverageEvaluationService(
         metadata_catalog=InMemoryMetadataCatalogRepository(sample_metadata_objects()),
         policies=InMemoryTransformationPolicyRepository(sample_transformation_policies()),
@@ -477,6 +498,7 @@ def build_api(
         baseline_refresh_requests=baseline_refresh_requests,
         catalog=catalog,
         classification_queries=classification_queries,
+        engine_capabilities=engine_capabilities,
         extraction_job_monitoring=extraction_job_monitoring,
         extraction_job_requests=extraction_job_requests,
         extraction_artifacts=extraction_artifacts,
@@ -516,6 +538,30 @@ def test_api_lists_systems_and_creates_job():
     assert create_response.body["status"] == "pending"
     assert create_response.body["sanitized_baseline_id"] == "baseline-crm-dev-v1"
     assert create_response.body["baseline_validation_summary"]["status"] == "passed"
+
+
+def test_api_lists_runtime_engine_capabilities():
+    app = build_api()
+
+    response = app.handle("GET", "/api/v1/engine-capabilities")
+
+    assert response.status_code == 200
+    assert [item["engine_type"] for item in response.body["items"]] == [
+        "oracle",
+        "postgres",
+    ]
+    assert all(item["release_ready"] for item in response.body["items"])
+
+
+def test_api_reads_single_runtime_engine_capability():
+    app = build_api()
+
+    response = app.handle("GET", "/api/v1/engine-capabilities/oracle")
+
+    assert response.status_code == 200
+    assert response.body["engine_type"] == "oracle"
+    assert response.body["metadata_discovery_supported"] is True
+    assert response.body["baseline_publish_supported"] is True
 
 
 def test_api_exposes_publish_job_audit_events():

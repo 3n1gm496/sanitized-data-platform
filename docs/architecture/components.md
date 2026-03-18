@@ -145,10 +145,13 @@ Leggere dati e metadati dalle sorgenti supportate.
 - logica vendor-specific isolata
 
 ### Initial scope
-Connector skeleton per:
+Adapter reali iniziali per:
 - PostgreSQL
-- SQL Server
 - Oracle
+
+### Future scope
+Adapter futuri possibili:
+- SQL Server
 - MySQL
 - MongoDB
 
@@ -169,6 +172,7 @@ Scoprire:
 
 ### Notes
 Le relazioni mancanti potranno essere inferite o definite manualmente.
+Nel runtime attuale PostgreSQL e Oracle hanno discovery reale e parità sui workflow principali.
 
 ---
 

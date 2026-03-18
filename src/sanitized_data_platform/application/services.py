@@ -5,6 +5,7 @@ from datetime import timedelta
 import hashlib
 import os
 
+from sanitized_data_platform.adapters.registry import AdapterRegistry, EngineAdapterSet
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
     AuditEvent,
@@ -34,6 +35,7 @@ from sanitized_data_platform.domain.enums import (
     BaselineRefreshStatus,
     BaselineStatus,
     ClassificationStatus,
+    DatabaseEngine,
     EnvironmentType,
     ExtractionArtifactStatus,
     ExtractionArtifactKind,
@@ -59,6 +61,8 @@ from .dto import (
     ClassificationView,
     CreateArtifactPublishJobCommand,
     CreateExtractionJobCommand,
+    EngineCapabilityListingView,
+    EngineCapabilityView,
     ExtractionArtifactView,
     GovernanceObjectSummaryView,
     ExtractionPlanSnapshotDetailView,
@@ -190,6 +194,39 @@ class CatalogQueryService:
             filtered.append(profile)
 
         return filtered
+
+
+class EngineCapabilityQueryService:
+    def __init__(self, registry: AdapterRegistry) -> None:
+        self._registry = registry
+
+    def list_engine_capabilities(self) -> EngineCapabilityListingView:
+        return EngineCapabilityListingView(
+            items=[self._to_view(item) for item in self._registry.list_all()]
+        )
+
+    def get_engine_capability(self, engine_type: str) -> EngineCapabilityView:
+        try:
+            normalized_engine = DatabaseEngine(engine_type)
+        except ValueError as exc:
+            raise DomainError(f"Unsupported engine type: {engine_type}") from exc
+
+        capability = self._registry.get(normalized_engine)
+        if capability is None:
+            raise DomainError(f"No runtime adapter set registered for engine: {engine_type}")
+        return self._to_view(capability)
+
+    @staticmethod
+    def _to_view(item: EngineAdapterSet) -> EngineCapabilityView:
+        return EngineCapabilityView(
+            engine_type=item.engine_type.value,
+            metadata_discovery_supported=item.metadata_discovery_supported,
+            extraction_supported=item.extraction_supported,
+            artifact_publish_supported=item.artifact_publish_supported,
+            baseline_refresh_supported=item.baseline_refresh_supported,
+            baseline_publish_supported=item.baseline_publish_supported,
+            release_ready=item.release_ready,
+        )
 
 
 class RowTransformationService:

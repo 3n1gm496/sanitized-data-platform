@@ -25,6 +25,7 @@ Valore iniziale proposto:
 - systems
 - environments
 - dataset-profiles
+- engine-capabilities
 - jobs
 - audit-events
 - metadata
@@ -47,3 +48,13 @@ Restituisce i sistemi disponibili per l’utente.
     "availableProfiles": 3
   }
 ]
+
+## 2. Engine Capabilities
+
+### GET /api/v1/engine-capabilities
+
+Restituisce i workflow runtime effettivamente disponibili per engine supportato.
+
+### GET /api/v1/engine-capabilities/{engineType}
+
+Restituisce il dettaglio delle capability runtime per un engine specifico.
