@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import os
 
 from sanitized_data_platform.adapters.postgres.extraction_pipeline import (
     PostgreSQLExtractionPipelineAdapter,
@@ -90,44 +91,53 @@ class PostgreSQLBaselineRefreshPipelineAdapter:
         baseline_assets: list[dict[str, object]] = []
         rows_materialized = 0
         notes: list[str] = []
-        for import_order, table in enumerate(ordered_tables):
-            plan = ExtractionPlan(
-                source_id=source.source_id,
-                root=ExtractionRoot(
-                    object_id=table.object_id,
-                    artifact_kind=ExtractionArtifactKind.FULL,
-                ),
-                traversal_rule=TraversalRule(include_related=False, max_depth=0),
-                selected_object_ids=(table.object_id,),
-                selected_relationship_ids=(),
-            )
-            extraction_job = ExtractionJob.create(
-                job_id=f"{job.job_id}:{table.object_id}",
-                source_id=source.source_id,
-                system_id=job.system_id,
-                plan_snapshot_id=f"{job.job_id}:{table.object_id}:snapshot",
-                root_object_id=table.object_id,
-                criteria=(),
-                include_related=False,
-                max_depth=0,
-                requested_by=job.requested_by,
-                created_at=created_at,
-            )
-            summary = self._extraction.execute(job=extraction_job, plan=plan)
-            baseline_assets.append(
-                {
-                    "artifactPath": summary["artifactPath"],
-                    "rootObjectId": table.object_id,
-                    "rowCount": int(summary["materializedRowCount"]),
-                    "checksum": summary["artifactChecksum"],
-                    "columnCount": summary["artifactColumnCount"],
-                    "importOrder": import_order,
-                }
-            )
-            rows_materialized += int(summary["materializedRowCount"])
-            for note in summary.get("notes", []):
-                if isinstance(note, str):
-                    notes.append(note)
+        created_paths: list[str] = []
+        try:
+            for import_order, table in enumerate(ordered_tables):
+                plan = ExtractionPlan(
+                    source_id=source.source_id,
+                    root=ExtractionRoot(
+                        object_id=table.object_id,
+                        artifact_kind=ExtractionArtifactKind.FULL,
+                    ),
+                    traversal_rule=TraversalRule(include_related=False, max_depth=0),
+                    selected_object_ids=(table.object_id,),
+                    selected_relationship_ids=(),
+                )
+                extraction_job = ExtractionJob.create(
+                    job_id=f"{job.job_id}:{table.object_id}",
+                    source_id=source.source_id,
+                    system_id=job.system_id,
+                    plan_snapshot_id=f"{job.job_id}:{table.object_id}:snapshot",
+                    root_object_id=table.object_id,
+                    criteria=(),
+                    include_related=False,
+                    max_depth=0,
+                    requested_by=job.requested_by,
+                    created_at=created_at,
+                )
+                summary = self._extraction.execute(job=extraction_job, plan=plan)
+                artifact_path = str(summary["artifactPath"])
+                created_paths.append(artifact_path)
+                baseline_assets.append(
+                    {
+                        "artifactPath": artifact_path,
+                        "rootObjectId": table.object_id,
+                        "rowCount": int(summary["materializedRowCount"]),
+                        "checksum": summary["artifactChecksum"],
+                        "columnCount": summary["artifactColumnCount"],
+                        "importOrder": import_order,
+                    }
+                )
+                rows_materialized += int(summary["materializedRowCount"])
+                for note in summary.get("notes", []):
+                    if isinstance(note, str):
+                        notes.append(note)
+        except Exception:
+            for artifact_path in created_paths:
+                if os.path.exists(artifact_path):
+                    os.unlink(artifact_path)
+            raise
 
         result: dict[str, object] = {
             "refreshStrategy": "postgres-materialized-baseline",

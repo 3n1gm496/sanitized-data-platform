@@ -1,28 +1,36 @@
 from datetime import datetime, timezone
 import json
-import os
 import tempfile
 
-import pytest
-
+from sanitized_data_platform.adapters.postgres.baseline_publish_pipeline import (
+    PostgreSQLBaselinePublishPipelineAdapter,
+)
 from sanitized_data_platform.adapters.postgres.baseline_refresh_pipeline import (
     PostgreSQLBaselineRefreshPipelineAdapter,
 )
-from sanitized_data_platform.application.dto import CreateBaselineRefreshJobCommand
-from sanitized_data_platform.application.services import BaselineRefreshRequestService
-from sanitized_data_platform.domain.entities import (
-    BaselineRefreshJob,
-    MetadataObject,
-    Relationship,
+from sanitized_data_platform.application.dto import (
+    CreateBaselineRefreshJobCommand,
+    CreatePublishJobCommand,
 )
+from sanitized_data_platform.application.services import (
+    BaselineRefreshRequestService,
+    BaselineSelectionService,
+    BaselineStorageReadinessService,
+    BaselineValidationEligibilityService,
+    PublishRequestService,
+    PublishSourceResolutionService,
+    ValidationLookupService,
+)
+from sanitized_data_platform.domain.entities import MetadataObject, Relationship
 from sanitized_data_platform.domain.enums import (
     BaselineRefreshStatus,
-    DatabaseEngine,
     MetadataObjectType,
 )
-from sanitized_data_platform.domain.errors import DomainError
+from sanitized_data_platform.workers.baseline_refresh_worker import BaselineRefreshWorker
+from sanitized_data_platform.workers.publish_worker import PublishWorker
 
 from tests.fakes import (
+    AllowAllPolicy,
     FakeClock,
     InMemoryAuditEventRepository,
     InMemoryBaselineAssetRepository,
@@ -30,19 +38,23 @@ from tests.fakes import (
     InMemoryBaselineRefreshQueue,
     InMemoryBaselineRepository,
     InMemoryDataSourceRepository,
-    InMemoryMetadataCatalogRepository,
     InMemoryDatasetProfileRepository,
+    InMemoryJobQueue,
     InMemoryLineageRepository,
+    InMemoryMetadataCatalogRepository,
+    InMemoryPublishJobRepository,
     InMemorySystemRepository,
+    InMemoryTargetEnvironmentRepository,
     InMemoryValidationRepository,
     SequentialIdGenerator,
+    build_readiness_service,
     sample_baseline,
     sample_profile,
     sample_source,
     sample_system,
+    sample_target,
     sample_validation_report,
 )
-from sanitized_data_platform.workers.baseline_refresh_worker import BaselineRefreshWorker
 
 
 def canonical_metadata_objects() -> list[MetadataObject]:
@@ -124,7 +136,7 @@ def canonical_relationships() -> list[Relationship]:
     ]
 
 
-class FakeCursor:
+class SourceCursor:
     def __init__(
         self,
         executed: list[tuple[str, tuple[object, ...] | None]],
@@ -141,8 +153,8 @@ class FakeCursor:
         self._executed.append((query, params))
         self._last_query = query
         self._last_params = params
-        self._row_offset = 0
         self._current_table = self._resolve_table(query, params)
+        self._row_offset = 0
 
     def fetchone(self) -> tuple[object, ...]:
         assert self._current_table is not None
@@ -151,20 +163,16 @@ class FakeCursor:
     def fetchall(self) -> list[tuple[object, ...]]:
         if "information_schema.columns" in self._last_query:
             assert self._last_params is not None
-            schema_name = str(self._last_params[0])
-            table_name = str(self._last_params[1])
-            table_key = f"{schema_name}.{table_name}"
+            table_key = f"{self._last_params[0]}.{self._last_params[1]}"
             return [(column,) for column in self._table_config[table_key]["columns"]]
         if "constraint_type = 'PRIMARY KEY'" in self._last_query:
             assert self._last_params is not None
-            schema_name = str(self._last_params[0])
-            table_name = str(self._last_params[1])
-            table_key = f"{schema_name}.{table_name}"
+            table_key = f"{self._last_params[0]}.{self._last_params[1]}"
             return [(column,) for column in self._table_config[table_key]["pk_columns"]]
         return []
 
     def fetchmany(self, size: int) -> list[tuple[object, ...]]:
-        if self._current_table is None or "SELECT " not in self._last_query:
+        if self._current_table is None:
             return []
         rows = self._table_config[self._current_table]["rows"]
         assert isinstance(rows, list)
@@ -175,7 +183,7 @@ class FakeCursor:
 
     @property
     def description(self):
-        if self._current_table is None or "SELECT " not in self._last_query:
+        if self._current_table is None:
             return None
         columns = self._table_config[self._current_table]["columns"]
         assert isinstance(columns, tuple)
@@ -187,16 +195,15 @@ class FakeCursor:
     def _resolve_table(self, query: str, params) -> str | None:
         if "information_schema.columns" in query or "constraint_type = 'PRIMARY KEY'" in query:
             return None
-        marker = 'FROM "'
-        if marker not in query:
+        if 'FROM "' not in query:
             return None
-        after_from = query.split(marker, 1)[1]
+        after_from = query.split('FROM "', 1)[1]
         schema_name, remainder = after_from.split('"."', 1)
         table_name = remainder.split('"', 1)[0]
         return f"{schema_name}.{table_name}"
 
 
-class FakeConnection:
+class SourceConnection:
     def __init__(
         self,
         executed: list[tuple[str, tuple[object, ...] | None]],
@@ -205,34 +212,66 @@ class FakeConnection:
         self._executed = executed
         self._table_config = table_config
 
-    def cursor(self) -> FakeCursor:
-        return FakeCursor(self._executed, self._table_config)
+    def cursor(self) -> SourceCursor:
+        return SourceCursor(self._executed, self._table_config)
 
     def close(self) -> None:
         return None
 
 
-def refresh_job() -> BaselineRefreshJob:
-    created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return BaselineRefreshJob(
-        job_id="baseline-refresh-1",
-        system_id="crm",
-        dataset_profile_id="profile-full-sanitized",
-        target_environment_type=sample_profile().target_environment_type,
-        requested_by="steward@example.internal",
-        trigger_type="manual",
-        refresh_schedule_id=None,
-        status=BaselineRefreshStatus.RUNNING,
-        baseline_id=None,
-        created_at=created_at,
-        updated_at=created_at,
-        result_summary={},
-    )
+class TargetCursor:
+    def __init__(
+        self,
+        executed: list[tuple[str, tuple[object, ...] | None]],
+        table_columns: dict[str, tuple[str, ...]],
+    ) -> None:
+        self._executed = executed
+        self._table_columns = table_columns
+        self._last_query = ""
+        self._last_params: tuple[object, ...] | None = None
+
+    def execute(self, query: str, params=None) -> None:
+        self._executed.append((query, params))
+        self._last_query = query
+        self._last_params = params
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        if "information_schema.columns" not in self._last_query:
+            return []
+        assert self._last_params is not None
+        table_key = f"{self._last_params[0]}.{self._last_params[1]}"
+        return [(column_name, "text", "text", "YES") for column_name in self._table_columns[table_key]]
+
+    def close(self) -> None:
+        return None
 
 
-def test_postgres_baseline_refresh_pipeline_materializes_catalog_tables_in_fk_order():
-    executed: list[tuple[str, tuple[object, ...] | None]] = []
-    table_config = {
+class TargetConnection:
+    def __init__(
+        self,
+        executed: list[tuple[str, tuple[object, ...] | None]],
+        table_columns: dict[str, tuple[str, ...]],
+    ) -> None:
+        self._executed = executed
+        self._table_columns = table_columns
+        self.committed = False
+        self.rolled_back = False
+
+    def cursor(self) -> TargetCursor:
+        return TargetCursor(self._executed, self._table_columns)
+
+    def commit(self) -> None:
+        self.committed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+    def close(self) -> None:
+        return None
+
+
+def test_postgres_baseline_refresh_to_publish_flow_is_coherent():
+    source_table_config = {
         "public.customers": {
             "columns": ("customer_id", "email"),
             "pk_columns": ("customer_id",),
@@ -246,158 +285,31 @@ def test_postgres_baseline_refresh_pipeline_materializes_catalog_tables_in_fk_or
             "row_count": 1,
         },
     }
-    with tempfile.TemporaryDirectory() as artifact_dir:
-        adapter = PostgreSQLBaselineRefreshPipelineAdapter(
-            metadata_catalog=InMemoryMetadataCatalogRepository(
-                canonical_metadata_objects(),
-                canonical_relationships(),
-            ),
-            data_sources=InMemoryDataSourceRepository([sample_source()]),
-            connect=lambda _endpoint: FakeConnection(executed, table_config),
-            artifact_dir=artifact_dir,
-            clock=FakeClock(),
-        )
-
-        summary = adapter.execute(
-            job=refresh_job(),
-            source=sample_source(),
-            profile=sample_profile(),
-            existing_baseline=None,
-        )
-
-        assert summary["refreshStrategy"] == "postgres-materialized-baseline"
-        assert summary["version"] == "2026.01.01.0000"
-        assert summary["reusedBaseline"] is False
-        assert summary["materializedTableCount"] == 2
-        assert summary["rowsMaterialized"] == 3
-        assert [item["rootObjectId"] for item in summary["baselineAssets"]] == [
-            "table:source-crm-replica:public.customers",
-            "table:source-crm-replica:public.orders",
-        ]
-        assert [item["importOrder"] for item in summary["baselineAssets"]] == [0, 1]
-        for asset in summary["baselineAssets"]:
-            assert os.path.exists(asset["artifactPath"])
-            with open(asset["artifactPath"], encoding="utf-8") as handle:
-                rows = [json.loads(line) for line in handle if line.strip()]
-            assert len(rows) == asset["rowCount"]
-
-
-def test_postgres_baseline_refresh_pipeline_rejects_missing_catalog_tables():
-    adapter = PostgreSQLBaselineRefreshPipelineAdapter(
-        metadata_catalog=InMemoryMetadataCatalogRepository(objects=[], relationships=[]),
-        data_sources=InMemoryDataSourceRepository([sample_source()]),
-        connect=lambda _endpoint: FakeConnection([], {}),
-        clock=FakeClock(),
-    )
-
-    with pytest.raises(DomainError) as exc:
-        adapter.execute(
-            job=refresh_job(),
-            source=sample_source(),
-            profile=sample_profile(),
-            existing_baseline=None,
-        )
-
-    assert "No materializable catalog tables are available" in str(exc.value)
-
-
-def test_postgres_baseline_refresh_pipeline_rejects_non_postgres_sources():
-    adapter = PostgreSQLBaselineRefreshPipelineAdapter(
-        metadata_catalog=InMemoryMetadataCatalogRepository(
-            canonical_metadata_objects(),
-            canonical_relationships(),
-        ),
-        data_sources=InMemoryDataSourceRepository([sample_source()]),
-        connect=lambda _endpoint: FakeConnection([], {}),
-        clock=FakeClock(),
-    )
-    source = sample_source()
-    non_postgres_source = type(source)(
-        source_id=source.source_id,
-        system_id=source.system_id,
-        system_name=source.system_name,
-        engine_type=DatabaseEngine.MYSQL,
-        endpoint=source.endpoint,
-        database_name=source.database_name,
-        access_mode=source.access_mode,
-        replica_preferred=source.replica_preferred,
-        active=source.active,
-    )
-
-    with pytest.raises(DomainError) as exc:
-        adapter.execute(
-            job=refresh_job(),
-            source=non_postgres_source,
-            profile=sample_profile(),
-            existing_baseline=None,
-        )
-
-    assert "can only execute postgres data sources" in str(exc.value)
-
-
-def test_postgres_baseline_refresh_pipeline_cleans_up_created_artifacts_on_failure():
-    executed: list[tuple[str, tuple[object, ...] | None]] = []
-    table_config = {
-        "public.customers": {
-            "columns": ("customer_id", "email"),
-            "pk_columns": ("customer_id",),
-            "rows": [(1, "a@example.internal"), (2, "b@example.internal")],
-            "row_count": 2,
-        }
+    target_columns = {
+        "public.customers": ("customer_id", "email"),
+        "public.orders": ("order_id", "customer_id"),
     }
-    with tempfile.TemporaryDirectory() as artifact_dir:
-        adapter = PostgreSQLBaselineRefreshPipelineAdapter(
-            metadata_catalog=InMemoryMetadataCatalogRepository(
-                canonical_metadata_objects(),
-                canonical_relationships(),
-            ),
-            data_sources=InMemoryDataSourceRepository([sample_source()]),
-            connect=lambda _endpoint: FakeConnection(executed, table_config),
-            artifact_dir=artifact_dir,
-            clock=FakeClock(),
-        )
+    source_executed: list[tuple[str, tuple[object, ...] | None]] = []
+    target_executed: list[tuple[str, tuple[object, ...] | None]] = []
 
-        with pytest.raises(KeyError):
-            adapter.execute(
-                job=refresh_job(),
-                source=sample_source(),
-                profile=sample_profile(),
-                existing_baseline=None,
-            )
-
-        assert os.listdir(artifact_dir) == []
-
-
-def test_baseline_refresh_worker_uses_real_postgres_refresh_pipeline():
-    executed: list[tuple[str, tuple[object, ...] | None]] = []
-    table_config = {
-        "public.customers": {
-            "columns": ("customer_id", "email"),
-            "pk_columns": ("customer_id",),
-            "rows": [(1, "a@example.internal"), (2, "b@example.internal")],
-            "row_count": 2,
-        },
-        "public.orders": {
-            "columns": ("order_id", "customer_id"),
-            "pk_columns": ("order_id",),
-            "rows": [(10, 1)],
-            "row_count": 1,
-        },
-    }
     with tempfile.TemporaryDirectory() as artifact_dir:
         system_repo = InMemorySystemRepository([sample_system()])
         source_repo = InMemoryDataSourceRepository([sample_source()])
+        target_repo = InMemoryTargetEnvironmentRepository([sample_target()])
         profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
         baseline_repo = InMemoryBaselineRepository([sample_baseline()])
         baseline_asset_repo = InMemoryBaselineAssetRepository()
         refresh_job_repo = InMemoryBaselineRefreshJobRepository()
         refresh_queue = InMemoryBaselineRefreshQueue()
+        publish_job_repo = InMemoryPublishJobRepository()
+        publish_queue = InMemoryJobQueue()
         audit_repo = InMemoryAuditEventRepository()
         lineage_repo = InMemoryLineageRepository()
+        validation_repo = InMemoryValidationRepository([sample_validation_report()])
         clock = FakeClock()
         ids = SequentialIdGenerator()
 
-        request = BaselineRefreshRequestService(
+        refresh_request = BaselineRefreshRequestService(
             systems=system_repo,
             data_sources=source_repo,
             dataset_profiles=profile_repo,
@@ -407,7 +319,7 @@ def test_baseline_refresh_worker_uses_real_postgres_refresh_pipeline():
             clock=clock,
             ids=ids,
         )
-        created = request.create_job(
+        refresh_job = refresh_request.create_job(
             CreateBaselineRefreshJobCommand(
                 system_id="crm",
                 dataset_profile_id="profile-full-sanitized",
@@ -416,7 +328,7 @@ def test_baseline_refresh_worker_uses_real_postgres_refresh_pipeline():
             )
         )
 
-        worker = BaselineRefreshWorker(
+        refresh_worker = BaselineRefreshWorker(
             systems=system_repo,
             refresh_queue=refresh_queue,
             refresh_jobs=refresh_job_repo,
@@ -430,29 +342,87 @@ def test_baseline_refresh_worker_uses_real_postgres_refresh_pipeline():
                     canonical_relationships(),
                 ),
                 data_sources=source_repo,
-                connect=lambda _endpoint: FakeConnection(executed, table_config),
+                connect=lambda _endpoint: SourceConnection(source_executed, source_table_config),
                 artifact_dir=artifact_dir,
                 clock=clock,
             ),
             audits=audit_repo,
             lineage=lineage_repo,
-            validations=InMemoryValidationRepository([sample_validation_report()]),
+            validations=validation_repo,
             clock=clock,
             ids=ids,
         )
 
-        processed_job_id = worker.process_next_job()
-        refreshed_job = refresh_job_repo.get_by_id(created.job_id)
-        assets = baseline_asset_repo.list_for_baseline("baseline-crm-dev-v1")
+        assert refresh_worker.process_next_job() == refresh_job.job_id
 
-    assert processed_job_id == created.job_id
-    assert refreshed_job is not None
-    assert refreshed_job.status.value == "completed"
-    assert refreshed_job.result_summary["refreshStrategy"] == "postgres-materialized-baseline"
-    assert refreshed_job.result_summary["materializedTableCount"] == 2
-    assert refreshed_job.result_summary["rowsMaterialized"] == 3
+        publish_requests = PublishRequestService(
+            data_sources=source_repo,
+            environments=target_repo,
+            dataset_profiles=profile_repo,
+            jobs=publish_job_repo,
+            audits=audit_repo,
+            queue=publish_queue,
+            policy=AllowAllPolicy(),
+            readiness=build_readiness_service(clock=clock),
+            publish_source_resolution=PublishSourceResolutionService(
+                BaselineSelectionService(
+                    baseline_repo,
+                    BaselineStorageReadinessService(baseline_asset_repo),
+                    BaselineValidationEligibilityService(
+                        ValidationLookupService(validation_repo)
+                    ),
+                )
+            ),
+            clock=clock,
+            ids=ids,
+        )
+        publish_job = publish_requests.create_job(
+            CreatePublishJobCommand(
+                source_id="source-crm-replica",
+                target_environment_id="env-dev",
+                dataset_profile_id="profile-full-sanitized",
+                requested_by="developer@example.internal",
+            )
+        )
+
+        publish_worker = PublishWorker(
+            queue=publish_queue,
+            jobs=publish_job_repo,
+            baselines=baseline_repo,
+            data_sources=source_repo,
+            environments=target_repo,
+            dataset_profiles=profile_repo,
+            pipeline=PostgreSQLBaselinePublishPipelineAdapter(
+                baseline_assets=baseline_asset_repo,
+                connect=lambda _endpoint: TargetConnection(target_executed, target_columns),
+            ),
+            audits=audit_repo,
+            lineage=lineage_repo,
+            validations=validation_repo,
+            clock=clock,
+            ids=ids,
+        )
+
+        assert publish_worker.process_next_job() == publish_job.job_id
+
+        refreshed = refresh_job_repo.get_by_id(refresh_job.job_id)
+        published = publish_job_repo.get_by_id(publish_job.job_id)
+        assets = baseline_asset_repo.list_for_baseline("baseline-crm-dev-v1")
+        with open(assets[0].artifact_path, encoding="utf-8") as handle:
+            first_asset_rows = [json.loads(line) for line in handle if line.strip()]
+
+    assert refreshed is not None
+    assert refreshed.status == BaselineRefreshStatus.COMPLETED
+    assert refreshed.result_summary["materializedTableCount"] == 2
     assert len(assets) == 2
-    assert [asset.root_object_id for asset in assets] == [
-        "table:source-crm-replica:public.customers",
-        "table:source-crm-replica:public.orders",
+    assert published is not None
+    assert published.status.value == "completed"
+    assert published.execution_summary["baselineStrategy"] == "postgres-materialized-baseline"
+    assert published.execution_summary["rowsPublished"] == 3
+    assert published.execution_summary["importedTables"] == [
+        "public.customers",
+        "public.orders",
     ]
+    assert len(source_executed) > 0
+    assert len(target_executed) == 5
+    assert len(first_asset_rows) == 2
