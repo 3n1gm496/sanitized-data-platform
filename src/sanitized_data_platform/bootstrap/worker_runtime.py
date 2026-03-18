@@ -575,6 +575,19 @@ def run_named_worker(
     settings: PlatformSettings | None = None,
     max_cycles: int | None = None,
 ) -> object:
+    supported_kinds = {
+        "publish",
+        "extraction",
+        "artifact_publish",
+        "baseline_refresh",
+        "refresh_schedule_dispatch",
+        "artifact_retention",
+        "artifact_cleanup",
+        "stale_job_recovery",
+    }
+    if worker_kind not in supported_kinds:
+        raise DomainError(f"Unsupported worker kind: {worker_kind}")
+
     resolved_settings = settings or PlatformSettings.from_env()
     bundle = build_production_worker_bundle(resolved_settings)
     logger = logging.getLogger("sanitized_data_platform.worker")

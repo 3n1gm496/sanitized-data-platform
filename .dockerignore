@@ -1,0 +1,13 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+build
+dist
+frontend/app/node_modules
+frontend/app/dist
+frontend/app/*.tsbuildinfo

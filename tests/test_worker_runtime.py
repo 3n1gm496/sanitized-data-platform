@@ -9,6 +9,7 @@ from sanitized_data_platform.bootstrap.production import build_sqlite_seeded_api
 from sanitized_data_platform.bootstrap.worker_runtime import (
     PollingWorkerRunner,
     build_sqlite_seeded_worker_bundle,
+    run_named_worker,
 )
 
 
@@ -82,3 +83,12 @@ def test_stale_job_recovery_requeues_publish_job_without_active_lease(tmp_path):
     assert summary["recoveredJobCount"] >= 1
     assert recovered.status == JobStatus.PENDING
     assert any(event.event_type == "job_recovered_after_stale_lease" for event in events)
+
+
+def test_run_named_worker_rejects_unknown_kind():
+    try:
+        run_named_worker("does-not-exist", max_cycles=1)
+    except Exception as exc:
+        assert "Unsupported worker kind" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported worker kind failure")

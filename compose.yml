@@ -16,8 +16,16 @@ services:
     volumes:
       - artifact_data:/var/lib/sanitized-data-platform/artifacts
       - baseline_data:/var/lib/sanitized-data-platform/baselines
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-publish:
     build:
@@ -33,8 +41,10 @@ services:
     volumes:
       - artifact_data:/var/lib/sanitized-data-platform/artifacts
       - baseline_data:/var/lib/sanitized-data-platform/baselines
+    restart: unless-stopped
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-extraction:
     build:
@@ -50,8 +60,10 @@ services:
     volumes:
       - artifact_data:/var/lib/sanitized-data-platform/artifacts
       - baseline_data:/var/lib/sanitized-data-platform/baselines
+    restart: unless-stopped
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-artifact-publish:
     build:
@@ -67,8 +79,10 @@ services:
     volumes:
       - artifact_data:/var/lib/sanitized-data-platform/artifacts
       - baseline_data:/var/lib/sanitized-data-platform/baselines
+    restart: unless-stopped
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-baseline-refresh:
     build:
@@ -84,8 +98,10 @@ services:
     volumes:
       - artifact_data:/var/lib/sanitized-data-platform/artifacts
       - baseline_data:/var/lib/sanitized-data-platform/baselines
+    restart: unless-stopped
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-refresh-schedule-dispatch:
     build:
@@ -99,8 +115,10 @@ services:
       SDP_WORKER_KIND: refresh_schedule_dispatch
       SDP_WORKER_ID: worker-refresh-schedule-dispatch
       SDP_WORKER_MAX_CYCLES: "1"
+    restart: "no"
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-artifact-retention:
     build:
@@ -114,8 +132,10 @@ services:
       SDP_WORKER_KIND: artifact_retention
       SDP_WORKER_ID: worker-artifact-retention
       SDP_WORKER_MAX_CYCLES: "1"
+    restart: "no"
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-artifact-cleanup:
     build:
@@ -129,8 +149,10 @@ services:
       SDP_WORKER_KIND: artifact_cleanup
       SDP_WORKER_ID: worker-artifact-cleanup
       SDP_WORKER_MAX_CYCLES: "1"
+    restart: "no"
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   worker-stale-job-recovery:
     build:
@@ -144,8 +166,10 @@ services:
       SDP_WORKER_KIND: stale_job_recovery
       SDP_WORKER_ID: worker-stale-job-recovery
       SDP_WORKER_MAX_CYCLES: "1"
+    restart: "no"
     depends_on:
-      - control-plane-postgres
+      control-plane-postgres:
+        condition: service_healthy
 
   frontend:
     build:
@@ -155,8 +179,10 @@ services:
       VITE_API_BASE_URL: http://localhost:8000
     ports:
       - "4173:4173"
+    restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
   control-plane-postgres:
     image: postgres:16-alpine
@@ -168,6 +194,13 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanitized -d sanitized_control_plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   artifact_data:
