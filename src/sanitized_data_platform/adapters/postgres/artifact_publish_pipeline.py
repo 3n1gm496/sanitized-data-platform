@@ -28,7 +28,7 @@ class ConnectionLike(Protocol):
 class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
     _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _LIST_TABLE_COLUMNS_SQL = """
-        SELECT column_name
+        SELECT column_name, data_type, udt_name, is_nullable
         FROM information_schema.columns
         WHERE table_schema = %s
           AND table_name = %s
@@ -70,6 +70,7 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
             checksum = hashlib.sha256()
             with open(artifact.artifact_path, encoding="utf-8") as artifact_file:
                 column_names: list[str] | None = None
+                column_specs: dict[str, dict[str, object]] | None = None
                 insert_sql: str | None = None
                 for raw_line in artifact_file:
                     checksum.update(raw_line.encode("utf-8"))
@@ -82,7 +83,7 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
                     if column_names is None:
                         column_names = [str(name) for name in row.keys()]
                         self._validate_columns(column_names)
-                        self._validate_target_table_projection(
+                        column_specs = self._load_target_table_projection(
                             cursor=cursor,
                             schema_name=schema_name,
                             table_name=table_name,
@@ -97,6 +98,8 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
                         raise DomainError(
                             "Artifact publish requires a consistent JSONL column projection."
                         )
+                    assert column_specs is not None
+                    self._validate_row_values(row=row, column_specs=column_specs)
                     assert insert_sql is not None
                     values = tuple(row[column_name] for column_name in column_names)
                     cursor.execute(insert_sql, values)
@@ -153,23 +156,24 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
                     f"Unsupported column name in artifact publish projection: {column_name}"
                 )
 
-    def _validate_target_table_projection(
+    def _load_target_table_projection(
         self,
         *,
         cursor: CursorLike,
         schema_name: str,
         table_name: str,
         column_names: list[str],
-    ) -> None:
+    ) -> dict[str, dict[str, object]]:
         cursor.execute(
             self._LIST_TABLE_COLUMNS_SQL,
             (schema_name, table_name),
         )
-        available_columns = [str(row[0]) for row in cursor.fetchall()]
-        if not available_columns:
+        rows = cursor.fetchall()
+        if not rows:
             raise DomainError(
                 f"Target table is not available for artifact publish: {schema_name}.{table_name}"
             )
+        available_columns = [str(row[0]) for row in rows]
         missing_columns = [
             column_name for column_name in column_names if column_name not in available_columns
         ]
@@ -178,6 +182,58 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
                 "Artifact publish projection does not match target table columns: "
                 + ", ".join(missing_columns)
             )
+        specs = {
+            str(row[0]): {
+                "dataType": str(row[1]),
+                "udtName": str(row[2]),
+                "nullable": str(row[3]).upper() == "YES",
+            }
+            for row in rows
+        }
+        return {column_name: specs[column_name] for column_name in column_names}
+
+    def _validate_row_values(
+        self,
+        *,
+        row: dict[str, object],
+        column_specs: dict[str, dict[str, object]],
+    ) -> None:
+        for column_name, value in row.items():
+            spec = column_specs[column_name]
+            if value is None:
+                if not bool(spec["nullable"]):
+                    raise DomainError(
+                        f"Artifact publish requires non-null values for target column: {column_name}"
+                    )
+                continue
+            if not self._is_value_compatible(value=value, spec=spec):
+                raise DomainError(
+                    f"Artifact publish value is not compatible with target column type: {column_name}"
+                )
+
+    def _is_value_compatible(
+        self,
+        *,
+        value: object,
+        spec: dict[str, object],
+    ) -> bool:
+        data_type = str(spec["dataType"]).lower()
+        udt_name = str(spec["udtName"]).lower()
+        if data_type in {"smallint", "integer", "bigint"} or udt_name in {"int2", "int4", "int8"}:
+            return isinstance(value, int) and not isinstance(value, bool)
+        if data_type in {"numeric", "decimal", "real", "double precision"} or udt_name in {
+            "numeric",
+            "float4",
+            "float8",
+        }:
+            return (
+                isinstance(value, int) and not isinstance(value, bool)
+            ) or isinstance(value, float)
+        if data_type == "boolean" or udt_name == "bool":
+            return isinstance(value, bool)
+        if data_type in {"json", "jsonb"} or udt_name in {"json", "jsonb"}:
+            return isinstance(value, (dict, list, str, int, float, bool)) or value is None
+        return isinstance(value, (str, int, float, bool, dict, list))
 
     def _build_insert_sql(
         self,

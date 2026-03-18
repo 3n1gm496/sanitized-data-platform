@@ -272,6 +272,11 @@ class ApiApp:
                 lineage = self._lineage_queries.get_baseline_lineage(baseline_id)
                 return ApiResponse(status_code=200, body=asdict(lineage))
 
+            if method == "GET" and path.startswith("/api/v1/baselines/") and path.endswith("/assets"):
+                baseline_id = path.removeprefix("/api/v1/baselines/").removesuffix("/assets")
+                assets = self._baselines.list_baseline_assets(baseline_id)
+                return ApiResponse(status_code=200, body=asdict(assets))
+
             if method == "GET" and path.startswith("/api/v1/baselines/") and path.endswith("/validation"):
                 baseline_id = path.removeprefix("/api/v1/baselines/").removesuffix("/validation")
                 report = self._validation_queries.get_validation_report_for_baseline(baseline_id)

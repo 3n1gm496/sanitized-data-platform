@@ -48,7 +48,10 @@ class FakeInsertCursor:
 
     def fetchall(self) -> list[tuple[object, ...]]:
         if "information_schema.columns" in self._last_query:
-            return [(column_name,) for column_name in self._table_columns]
+            return [
+                (column_name, "text", "text", "YES")
+                for column_name in self._table_columns
+            ]
         return []
 
     def close(self) -> None:

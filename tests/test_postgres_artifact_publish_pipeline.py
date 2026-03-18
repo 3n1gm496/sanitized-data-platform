@@ -20,9 +20,13 @@ class FakeCursor:
         self,
         executed: list[tuple[str, tuple[object, ...] | None]],
         table_columns: tuple[str, ...],
+        column_specs: dict[str, tuple[str, str, str]] | None = None,
     ) -> None:
         self._executed = executed
         self._table_columns = table_columns
+        self._column_specs = column_specs or {
+            column_name: ("text", "text", "YES") for column_name in table_columns
+        }
         self._last_query = ""
 
     def execute(self, query: str, params=None) -> None:
@@ -31,7 +35,15 @@ class FakeCursor:
 
     def fetchall(self) -> list[tuple[object, ...]]:
         if "information_schema.columns" in self._last_query:
-            return [(column_name,) for column_name in self._table_columns]
+            return [
+                (
+                    column_name,
+                    self._column_specs[column_name][0],
+                    self._column_specs[column_name][1],
+                    self._column_specs[column_name][2],
+                )
+                for column_name in self._table_columns
+            ]
         return []
 
     def close(self) -> None:
@@ -43,14 +55,16 @@ class FakeConnection:
         self,
         executed: list[tuple[str, tuple[object, ...] | None]],
         table_columns: tuple[str, ...] = ("customer_id", "email"),
+        column_specs: dict[str, tuple[str, str, str]] | None = None,
     ) -> None:
         self._executed = executed
         self._table_columns = table_columns
+        self._column_specs = column_specs
         self.committed = False
         self.rolled_back = False
 
     def cursor(self) -> FakeCursor:
-        return FakeCursor(self._executed, self._table_columns)
+        return FakeCursor(self._executed, self._table_columns, self._column_specs)
 
     def commit(self) -> None:
         self.committed = True
@@ -246,5 +260,75 @@ def test_postgres_artifact_publish_pipeline_rejects_checksum_mismatch_before_com
             )
 
     assert "checksum verification failed before commit" in str(exc.value)
+    assert connection.committed is False
+    assert connection.rolled_back is True
+
+
+def test_postgres_artifact_publish_pipeline_rejects_incompatible_column_value_types():
+    connection = FakeConnection(
+        [],
+        table_columns=("customer_id", "email"),
+        column_specs={
+            "customer_id": ("integer", "int4", "NO"),
+            "email": ("text", "text", "NO"),
+        },
+    )
+    adapter = PostgreSQLArtifactPublishPipelineAdapter(
+        connect=lambda _endpoint: connection
+    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
+        payload = '{"customer_id": "not-an-int", "email": "a@example.internal"}\n'
+        handle.write(payload)
+        handle.flush()
+        artifact = replace(
+            sample_extraction_artifact(),
+            artifact_path=handle.name,
+            row_count=1,
+            checksum=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        )
+
+        with pytest.raises(DomainError) as exc:
+            adapter.execute(
+                job=artifact_publish_job(),
+                artifact=artifact,
+                target=sample_target(),
+            )
+
+    assert "value is not compatible with target column type: customer_id" in str(exc.value)
+    assert connection.committed is False
+    assert connection.rolled_back is True
+
+
+def test_postgres_artifact_publish_pipeline_rejects_null_for_non_nullable_columns():
+    connection = FakeConnection(
+        [],
+        table_columns=("customer_id", "email"),
+        column_specs={
+            "customer_id": ("integer", "int4", "NO"),
+            "email": ("text", "text", "NO"),
+        },
+    )
+    adapter = PostgreSQLArtifactPublishPipelineAdapter(
+        connect=lambda _endpoint: connection
+    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
+        payload = '{"customer_id": 1, "email": null}\n'
+        handle.write(payload)
+        handle.flush()
+        artifact = replace(
+            sample_extraction_artifact(),
+            artifact_path=handle.name,
+            row_count=1,
+            checksum=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        )
+
+        with pytest.raises(DomainError) as exc:
+            adapter.execute(
+                job=artifact_publish_job(),
+                artifact=artifact,
+                target=sample_target(),
+            )
+
+    assert "requires non-null values for target column: email" in str(exc.value)
     assert connection.committed is False
     assert connection.rolled_back is True

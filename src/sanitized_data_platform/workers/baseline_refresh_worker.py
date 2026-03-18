@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sanitized_data_platform.application.ports import (
     AuditEventRepository,
+    BaselineAssetRepository,
     BaselineRefreshJobRepository,
     BaselineRefreshPipelinePort,
     BaselineRefreshQueuePort,
@@ -19,8 +20,16 @@ from sanitized_data_platform.application.services import (
     ValidationLookupService,
     resolve_active_source_for_system,
 )
-from sanitized_data_platform.domain.entities import AuditEvent, SanitizedBaseline
-from sanitized_data_platform.domain.enums import BaselineRefreshStatus, BaselineStatus
+from sanitized_data_platform.domain.entities import (
+    AuditEvent,
+    BaselineTableAsset,
+    SanitizedBaseline,
+)
+from sanitized_data_platform.domain.enums import (
+    BaselineRefreshStatus,
+    BaselineStatus,
+    ExtractionArtifactFormat,
+)
 from sanitized_data_platform.domain.errors import DomainError
 
 
@@ -32,6 +41,7 @@ class BaselineRefreshWorker:
         refresh_queue: BaselineRefreshQueuePort,
         refresh_jobs: BaselineRefreshJobRepository,
         baselines: BaselineRepository,
+        baseline_assets: BaselineAssetRepository,
         data_sources: DataSourceRepository,
         dataset_profiles: DatasetProfileRepository,
         pipeline: BaselineRefreshPipelinePort,
@@ -45,6 +55,7 @@ class BaselineRefreshWorker:
         self._refresh_queue = refresh_queue
         self._refresh_jobs = refresh_jobs
         self._baselines = baselines
+        self._baseline_assets = baseline_assets
         self._data_sources = data_sources
         self._dataset_profiles = dataset_profiles
         self._pipeline = pipeline
@@ -124,6 +135,14 @@ class BaselineRefreshWorker:
                 self._baselines.add(baseline)
             else:
                 self._baselines.save(baseline)
+            self._baseline_assets.replace_for_baseline(
+                baseline.baseline_id,
+                self._materialize_baseline_assets(
+                    baseline=baseline,
+                    completed_at=completed_time,
+                    result=result,
+                ),
+            )
 
             job = job.transition_to(
                 BaselineRefreshStatus.COMPLETED,
@@ -229,3 +248,55 @@ class BaselineRefreshWorker:
                 created_at=created_at,
             )
         )
+
+    def _materialize_baseline_assets(
+        self,
+        *,
+        baseline: SanitizedBaseline,
+        completed_at,
+        result: dict[str, object],
+    ) -> list[BaselineTableAsset]:
+        raw_assets = result.get("baselineAssets", [])
+        if not isinstance(raw_assets, list):
+            raise DomainError("Baseline refresh result baselineAssets must be a list.")
+        assets: list[BaselineTableAsset] = []
+        for index, item in enumerate(raw_assets):
+            if not isinstance(item, dict):
+                raise DomainError("Baseline refresh baseline asset entries must be objects.")
+            artifact_path = item.get("artifactPath")
+            root_object_id = item.get("rootObjectId")
+            row_count = item.get("rowCount")
+            if not isinstance(artifact_path, str) or not artifact_path:
+                raise DomainError("Baseline refresh baseline asset requires artifactPath.")
+            if not isinstance(root_object_id, str) or not root_object_id:
+                raise DomainError("Baseline refresh baseline asset requires rootObjectId.")
+            if not isinstance(row_count, int):
+                raise DomainError("Baseline refresh baseline asset requires integer rowCount.")
+            assets.append(
+                BaselineTableAsset(
+                    asset_id=self._ids.new_id("baseline-asset"),
+                    baseline_id=baseline.baseline_id,
+                    source_id=baseline.source_id,
+                    root_object_id=root_object_id,
+                    artifact_format=ExtractionArtifactFormat.JSONL,
+                    artifact_path=artifact_path,
+                    row_count=row_count,
+                    created_at=completed_at,
+                    checksum=(
+                        item.get("checksum")
+                        if isinstance(item.get("checksum"), str)
+                        else None
+                    ),
+                    column_count=(
+                        item.get("columnCount")
+                        if isinstance(item.get("columnCount"), int)
+                        else None
+                    ),
+                    import_order=(
+                        item.get("importOrder")
+                        if isinstance(item.get("importOrder"), int)
+                        else index
+                    ),
+                )
+            )
+        return assets

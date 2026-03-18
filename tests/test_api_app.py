@@ -51,6 +51,7 @@ from tests.fakes import (
     InMemoryArtifactPublishJobRepository,
     InMemoryArtifactPublishQueue,
     InMemoryAuditEventRepository,
+    InMemoryBaselineAssetRepository,
     InMemoryBaselineRepository,
     InMemoryBaselineRefreshJobRepository,
     InMemoryBaselineRefreshQueue,
@@ -78,6 +79,7 @@ from tests.fakes import (
     build_publish_source_resolution_service,
     build_readiness_service,
     sample_baseline,
+    sample_baseline_asset,
     sample_classification_tags,
     sample_extraction_artifact,
     sample_metadata_objects,
@@ -164,6 +166,7 @@ def build_api(
     target_repo = InMemoryTargetEnvironmentRepository([sample_target()])
     profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
     baseline_repo = InMemoryBaselineRepository([sample_baseline()])
+    baseline_asset_repo = InMemoryBaselineAssetRepository([sample_baseline_asset()])
     refresh_job_repo = InMemoryBaselineRefreshJobRepository()
     refresh_queue = InMemoryBaselineRefreshQueue()
     refresh_schedule_repo = InMemoryBaselineRefreshScheduleRepository()
@@ -370,6 +373,7 @@ def build_api(
     baseline_queries = BaselineQueryService(
         systems=system_repo,
         baselines=baseline_repo,
+        baseline_assets=baseline_asset_repo,
         validations=ValidationLookupService(
             InMemoryValidationRepository([sample_validation_report()])
         ),
@@ -970,13 +974,28 @@ def test_api_exposes_baseline_listing_and_detail():
     assert list_response.body["items"][0]["baseline_id"] == "baseline-crm-dev-v1"
     assert list_response.body["items"][0]["publish_eligible"] is True
     assert list_response.body["items"][0]["eligibility"]["reason"] == "eligible"
+    assert list_response.body["items"][0]["asset_count"] == 1
+    assert list_response.body["items"][0]["storage_ready"] is True
     assert list_response.body["items"][0]["validation_summary"]["status"] == "passed"
 
     assert detail_response.status_code == 200
     assert detail_response.body["baseline_id"] == "baseline-crm-dev-v1"
     assert detail_response.body["publish_eligible"] is True
     assert detail_response.body["eligibility"]["reason"] == "eligible"
+    assert detail_response.body["asset_count"] == 1
+    assert detail_response.body["storage_ready"] is True
     assert detail_response.body["validation_summary"]["warning_count"] == 0
+
+
+def test_api_exposes_baseline_assets():
+    app = build_api()
+
+    response = app.handle("GET", "/api/v1/baselines/baseline-crm-dev-v1/assets")
+
+    assert response.status_code == 200
+    assert response.body["baseline_id"] == "baseline-crm-dev-v1"
+    assert response.body["items"][0]["asset_id"] == "baseline-asset-1"
+    assert response.body["items"][0]["artifact_format"] == "jsonl"
 
 
 def test_api_exposes_validation_report_for_baseline():

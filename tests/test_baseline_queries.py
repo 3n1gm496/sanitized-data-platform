@@ -7,22 +7,27 @@ from sanitized_data_platform.application.services import (
 from sanitized_data_platform.domain.enums import BaselineStatus, ValidationStatus
 
 from tests.fakes import (
+    InMemoryBaselineAssetRepository,
     InMemoryBaselineRepository,
     InMemorySystemRepository,
     InMemoryValidationRepository,
     PublishValidationSummaryService,
     ValidationLookupService,
     sample_baseline,
+    sample_baseline_asset,
     sample_system,
     sample_validation_report,
 )
 
 
-def build_service(*, baselines=None, validation_reports=None):
+def build_service(*, baselines=None, baseline_assets=None, validation_reports=None):
     return BaselineQueryService(
         systems=InMemorySystemRepository([sample_system()]),
         baselines=InMemoryBaselineRepository(
             [sample_baseline()] if baselines is None else baselines
+        ),
+        baseline_assets=InMemoryBaselineAssetRepository(
+            [sample_baseline_asset()] if baseline_assets is None else baseline_assets
         ),
         validations=ValidationLookupService(
             InMemoryValidationRepository(
@@ -46,6 +51,8 @@ def test_baseline_query_lists_baselines_with_eligibility_and_validation_summary(
     assert result.items[0].baseline_id == "baseline-crm-dev-v1"
     assert result.items[0].publish_eligible is True
     assert result.items[0].eligibility.reason == "eligible"
+    assert result.items[0].asset_count == 1
+    assert result.items[0].storage_ready is True
     assert result.items[0].validation_summary is not None
     assert result.items[0].validation_summary.status == "passed"
 
@@ -59,6 +66,8 @@ def test_baseline_query_reads_baseline_detail_with_eligibility():
     assert result.system_id == "crm"
     assert result.publish_eligible is True
     assert result.eligibility.reason == "eligible"
+    assert result.asset_count == 1
+    assert result.storage_ready is True
     assert result.validation_summary is not None
     assert result.validation_summary.error_count == 0
 
@@ -71,6 +80,17 @@ def test_baseline_query_explains_missing_validation_report():
     assert result.publish_eligible is False
     assert result.eligibility.reason == "missing_validation_report"
     assert result.validation_summary is None
+
+
+def test_baseline_query_explains_missing_materialized_assets():
+    service = build_service(baseline_assets=[])
+
+    result = service.get_baseline("baseline-crm-dev-v1")
+
+    assert result.publish_eligible is True
+    assert result.storage_ready is False
+    assert result.asset_count == 0
+    assert result.eligibility.reason == "missing_materialized_assets"
 
 
 def test_baseline_query_explains_failed_validation():

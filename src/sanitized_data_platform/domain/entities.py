@@ -393,6 +393,21 @@ class ExtractionArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineTableAsset:
+    asset_id: str
+    baseline_id: str
+    source_id: str
+    root_object_id: str
+    artifact_format: ExtractionArtifactFormat
+    artifact_path: str
+    row_count: int
+    created_at: datetime
+    checksum: str | None = None
+    column_count: int | None = None
+    import_order: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionJob:
     job_id: str
     source_id: str

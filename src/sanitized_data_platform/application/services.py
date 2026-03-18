@@ -8,6 +8,7 @@ import os
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
     AuditEvent,
+    BaselineTableAsset,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
     DataSource,
@@ -46,10 +47,12 @@ from sanitized_data_platform.domain.enums import (
 from .dto import (
     ArtifactPublishJobView,
     AuditEventView,
+    BaselineAssetListingView,
     BaselineDetailView,
     BaselineEligibilityView,
     BaselineListItemView,
     BaselineListingView,
+    BaselineTableAssetView,
     BaselineValidationSummaryView,
     BaselineRefreshJobView,
     ClassificationListingView,
@@ -85,6 +88,7 @@ from .ports import (
     ArtifactPublishJobRepository,
     ArtifactPublishQueuePort,
     AuditEventRepository,
+    BaselineAssetRepository,
     BaselineRepository,
     BaselineRefreshJobRepository,
     BaselineRefreshPipelinePort,
@@ -1594,6 +1598,17 @@ class BaselineValidationEligibilityService:
         return report
 
 
+class BaselineStorageReadinessService:
+    def __init__(self, baseline_assets: BaselineAssetRepository) -> None:
+        self._baseline_assets = baseline_assets
+
+    def require_storage_ready(self, baseline: SanitizedBaseline) -> None:
+        if not self._baseline_assets.list_for_baseline(baseline.baseline_id):
+            raise DomainError(
+                "No materialized baseline assets are available for the selected sanitized baseline."
+            )
+
+
 class PublishValidationSummaryService:
     def summarize(self, report: ValidationReport | None) -> ValidationSummaryView | None:
         if report is None:
@@ -1619,6 +1634,7 @@ class BaselineEligibilityExplanationService:
         report: ValidationReport | None,
         *,
         compatibility_mismatch: bool = False,
+        storage_ready: bool = True,
     ) -> BaselineEligibilityView:
         if compatibility_mismatch:
             return BaselineEligibilityView(
@@ -1638,6 +1654,13 @@ class BaselineEligibilityExplanationService:
                     "baselineId": baseline.baseline_id,
                     "baselineStatus": baseline.status.value,
                 },
+            )
+
+        if not storage_ready:
+            return BaselineEligibilityView(
+                eligible=False,
+                reason="missing_materialized_assets",
+                details={"baselineId": baseline.baseline_id},
             )
 
         if report is None:
@@ -1671,9 +1694,11 @@ class BaselineSelectionService:
     def __init__(
         self,
         baselines: BaselineRepository,
+        storage_readiness: BaselineStorageReadinessService,
         validation_eligibility: BaselineValidationEligibilityService,
     ) -> None:
         self._baselines = baselines
+        self._storage_readiness = storage_readiness
         self._validation_eligibility = validation_eligibility
 
     def select_for_publish(
@@ -1682,7 +1707,7 @@ class BaselineSelectionService:
         source: DataSource,
         target,
         profile,
-    ) -> SanitizedBaseline:
+    ) -> tuple[SanitizedBaseline, ValidationReport]:
         candidates = self._baselines.list_active_for_system(source.system_id)
         compatible = [
             baseline
@@ -1700,12 +1725,22 @@ class BaselineSelectionService:
             )
 
         compatible.sort(key=lambda baseline: baseline.refreshed_at, reverse=True)
+        saw_storage_issue = False
         for baseline in compatible:
             try:
+                self._storage_readiness.require_storage_ready(baseline)
                 report = self._validation_eligibility.require_publish_eligible(baseline)
                 return baseline, report
-            except DomainError:
+            except DomainError as exc:
+                if "materialized baseline assets" in str(exc):
+                    saw_storage_issue = True
                 continue
+
+        if saw_storage_issue:
+            raise DomainError(
+                "No compatible materially stored sanitized baseline is available for the"
+                " selected system, profile, and target environment."
+            )
 
         raise DomainError(
             "No compatible sufficiently validated sanitized baseline is available for the"
@@ -1739,12 +1774,14 @@ class BaselineQueryService:
         *,
         systems: SystemRepository,
         baselines: BaselineRepository,
+        baseline_assets: BaselineAssetRepository,
         validations: ValidationLookupService,
         validation_summary: PublishValidationSummaryService,
         eligibility: BaselineEligibilityExplanationService,
     ) -> None:
         self._systems = systems
         self._baselines = baselines
+        self._baseline_assets = baseline_assets
         self._validations = validations
         self._validation_summary = validation_summary
         self._eligibility = eligibility
@@ -1795,15 +1832,38 @@ class BaselineQueryService:
         if baseline is None:
             raise DomainError(f"Unknown sanitized baseline: {baseline_id}")
         report = self._validations.get_latest_for_baseline(baseline.baseline_id)
+        assets = self._baseline_assets.list_for_baseline(baseline.baseline_id)
+        storage_ready = bool(assets)
         return BaselineDetailView.from_baseline(
             baseline,
+            asset_count=len(assets),
+            storage_ready=storage_ready,
             publish_eligible=(False if report is None else report.is_publish_eligible),
-            eligibility=self._eligibility.explain(baseline, report),
+            eligibility=self._eligibility.explain(
+                baseline,
+                report,
+                storage_ready=storage_ready,
+            ),
             validation_summary=self._validation_summary.summarize_baseline(report),
+        )
+
+    def list_baseline_assets(self, baseline_id: str) -> BaselineAssetListingView:
+        baseline = self._baselines.get_by_id(baseline_id)
+        if baseline is None:
+            raise DomainError(f"Unknown sanitized baseline: {baseline_id}")
+        assets = sorted(
+            self._baseline_assets.list_for_baseline(baseline_id),
+            key=lambda asset: (asset.import_order, asset.root_object_id),
+        )
+        return BaselineAssetListingView(
+            baseline_id=baseline_id,
+            items=[BaselineTableAssetView.from_asset(asset) for asset in assets],
         )
 
     def _to_list_item(self, baseline: SanitizedBaseline) -> BaselineListItemView:
         report = self._validations.get_latest_for_baseline(baseline.baseline_id)
+        assets = self._baseline_assets.list_for_baseline(baseline.baseline_id)
+        storage_ready = bool(assets)
         return BaselineListItemView(
             baseline_id=baseline.baseline_id,
             system_id=baseline.system_id,
@@ -1815,8 +1875,14 @@ class BaselineQueryService:
             version=baseline.version,
             status=baseline.status.value,
             refreshed_at=baseline.refreshed_at,
+            asset_count=len(assets),
+            storage_ready=storage_ready,
             publish_eligible=(False if report is None else report.is_publish_eligible),
-            eligibility=self._eligibility.explain(baseline, report),
+            eligibility=self._eligibility.explain(
+                baseline,
+                report,
+                storage_ready=storage_ready,
+            ),
             validation_summary=self._validation_summary.summarize_baseline(report),
         )
 

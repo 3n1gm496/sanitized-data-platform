@@ -17,6 +17,7 @@ from sanitized_data_platform.application.services import (
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
     AuditEvent,
+    BaselineTableAsset,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
     DataSource,
@@ -144,6 +145,23 @@ class InMemoryBaselineRepository:
 
     def save(self, baseline: SanitizedBaseline) -> None:
         self._items[baseline.baseline_id] = baseline
+
+
+class InMemoryBaselineAssetRepository:
+    def __init__(self, items: list[BaselineTableAsset] | None = None) -> None:
+        self._items: dict[str, list[BaselineTableAsset]] = {}
+        for item in items or []:
+            self._items.setdefault(item.baseline_id, []).append(item)
+
+    def list_for_baseline(self, baseline_id: str) -> list[BaselineTableAsset]:
+        return list(self._items.get(baseline_id, []))
+
+    def replace_for_baseline(
+        self,
+        baseline_id: str,
+        assets: list[BaselineTableAsset],
+    ) -> None:
+        self._items[baseline_id] = list(assets)
 
 
 class InMemoryValidationRepository:
@@ -422,12 +440,22 @@ class StubPublishPipeline:
 
 
 class StubBaselineRefreshPipeline:
+    def __init__(
+        self,
+        *,
+        version: str = "2026.01.02.1",
+        baseline_assets: list[dict[str, object]] | None = None,
+    ) -> None:
+        self._version = version
+        self._baseline_assets = [] if baseline_assets is None else list(baseline_assets)
+
     def execute(self, **kwargs) -> dict[str, object]:
         existing_baseline = kwargs.get("existing_baseline")
         return {
             "refreshStrategy": "stubbed-refresh",
-            "version": "2026.01.02.1",
+            "version": self._version,
             "reusedBaseline": existing_baseline is not None,
+            "baselineAssets": list(self._baseline_assets),
         }
 
 
@@ -655,6 +683,29 @@ def sample_validation_report(
     )
 
 
+def sample_baseline_asset(
+    *,
+    asset_id: str = "baseline-asset-1",
+    baseline_id: str = "baseline-crm-dev-v1",
+    import_order: int = 0,
+) -> BaselineTableAsset:
+    source = sample_source()
+    created_at = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    return BaselineTableAsset(
+        asset_id=asset_id,
+        baseline_id=baseline_id,
+        source_id=source.source_id,
+        root_object_id="table:source-crm-replica:public.customers",
+        artifact_format=ExtractionArtifactFormat.JSONL,
+        artifact_path="/tmp/baseline-asset-1.jsonl",
+        row_count=2,
+        created_at=created_at,
+        checksum="baseline-asset-checksum-1",
+        column_count=2,
+        import_order=import_order,
+    )
+
+
 def sample_refresh_schedule() -> BaselineRefreshSchedule:
     now = datetime(2026, 1, 1, 8, tzinfo=timezone.utc)
     return BaselineRefreshSchedule(
@@ -817,6 +868,7 @@ def build_baseline_query_service() -> BaselineQueryService:
     return BaselineQueryService(
         systems=InMemorySystemRepository([sample_system()]),
         baselines=InMemoryBaselineRepository([sample_baseline()]),
+        baseline_assets=InMemoryBaselineAssetRepository([sample_baseline_asset()]),
         validations=ValidationLookupService(
             InMemoryValidationRepository([sample_validation_report()])
         ),
@@ -828,10 +880,12 @@ def build_baseline_query_service() -> BaselineQueryService:
 def build_publish_source_resolution_service(
     *,
     baselines: list[SanitizedBaseline] | None = None,
+    baseline_assets: list[BaselineTableAsset] | None = None,
     validation_reports: list[ValidationReport] | None = None,
 ):
     from sanitized_data_platform.application.services import (
         BaselineSelectionService,
+        BaselineStorageReadinessService,
         BaselineValidationEligibilityService,
         PublishSourceResolutionService,
         ValidationLookupService,
@@ -841,6 +895,13 @@ def build_publish_source_resolution_service(
         BaselineSelectionService(
             InMemoryBaselineRepository(
                 [sample_baseline()] if baselines is None else baselines
+            ),
+            BaselineStorageReadinessService(
+                InMemoryBaselineAssetRepository(
+                    [sample_baseline_asset()]
+                    if baseline_assets is None
+                    else baseline_assets
+                )
             ),
             BaselineValidationEligibilityService(
                 ValidationLookupService(

@@ -5,6 +5,7 @@ from typing import Any
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
     AuditEvent,
+    BaselineTableAsset,
     BaselineRefreshJob,
     ExtractionArtifact,
     BaselineRefreshSchedule,
@@ -759,6 +760,8 @@ class BaselineListItemView:
     version: str
     status: str
     refreshed_at: datetime
+    asset_count: int
+    storage_ready: bool
     publish_eligible: bool
     eligibility: BaselineEligibilityView
     validation_summary: BaselineValidationSummaryView | None
@@ -784,6 +787,8 @@ class BaselineDetailView:
     created_at: datetime
     refreshed_at: datetime
     active: bool
+    asset_count: int
+    storage_ready: bool
     publish_eligible: bool
     eligibility: BaselineEligibilityView
     validation_summary: BaselineValidationSummaryView | None
@@ -793,6 +798,8 @@ class BaselineDetailView:
         cls,
         baseline: SanitizedBaseline,
         *,
+        asset_count: int,
+        storage_ready: bool,
         publish_eligible: bool,
         eligibility: BaselineEligibilityView,
         validation_summary: BaselineValidationSummaryView | None,
@@ -810,7 +817,46 @@ class BaselineDetailView:
             created_at=baseline.created_at,
             refreshed_at=baseline.refreshed_at,
             active=baseline.active,
+            asset_count=asset_count,
+            storage_ready=storage_ready,
             publish_eligible=publish_eligible,
             eligibility=eligibility,
             validation_summary=validation_summary,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineTableAssetView:
+    asset_id: str
+    baseline_id: str
+    source_id: str
+    root_object_id: str
+    artifact_format: str
+    artifact_path: str
+    row_count: int
+    created_at: datetime
+    checksum: str | None
+    column_count: int | None
+    import_order: int
+
+    @classmethod
+    def from_asset(cls, asset: BaselineTableAsset) -> "BaselineTableAssetView":
+        return cls(
+            asset_id=asset.asset_id,
+            baseline_id=asset.baseline_id,
+            source_id=asset.source_id,
+            root_object_id=asset.root_object_id,
+            artifact_format=asset.artifact_format.value,
+            artifact_path=asset.artifact_path,
+            row_count=asset.row_count,
+            created_at=asset.created_at,
+            checksum=asset.checksum,
+            column_count=asset.column_count,
+            import_order=asset.import_order,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineAssetListingView:
+    baseline_id: str
+    items: list[BaselineTableAssetView]

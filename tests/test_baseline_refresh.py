@@ -10,6 +10,7 @@ from sanitized_data_platform.workers.baseline_refresh_worker import (
 from tests.fakes import (
     FakeClock,
     InMemoryAuditEventRepository,
+    InMemoryBaselineAssetRepository,
     InMemoryBaselineRefreshJobRepository,
     InMemoryBaselineRefreshQueue,
     InMemoryBaselineRepository,
@@ -100,6 +101,7 @@ def test_baseline_refresh_worker_processes_job_and_updates_baseline():
     source_repo = InMemoryDataSourceRepository([sample_source()])
     profile_repo = InMemoryDatasetProfileRepository([sample_profile()])
     baseline_repo = InMemoryBaselineRepository([sample_baseline()])
+    baseline_asset_repo = InMemoryBaselineAssetRepository()
     refresh_job_repo = InMemoryBaselineRefreshJobRepository()
     refresh_queue = InMemoryBaselineRefreshQueue()
     audit_repo = InMemoryAuditEventRepository()
@@ -131,9 +133,21 @@ def test_baseline_refresh_worker_processes_job_and_updates_baseline():
         refresh_queue=refresh_queue,
         refresh_jobs=refresh_job_repo,
         baselines=baseline_repo,
+        baseline_assets=baseline_asset_repo,
         data_sources=source_repo,
         dataset_profiles=profile_repo,
-        pipeline=StubBaselineRefreshPipeline(),
+        pipeline=StubBaselineRefreshPipeline(
+            baseline_assets=[
+                {
+                    "artifactPath": "/tmp/baseline-customers.jsonl",
+                    "rootObjectId": "table:source-crm-replica:public.customers",
+                    "rowCount": 2,
+                    "checksum": "baseline-checksum-1",
+                    "columnCount": 2,
+                    "importOrder": 0,
+                }
+            ]
+        ),
         audits=audit_repo,
         lineage=lineage_repo,
         validations=InMemoryValidationRepository([sample_validation_report()]),
@@ -144,6 +158,7 @@ def test_baseline_refresh_worker_processes_job_and_updates_baseline():
     processed_job_id = worker.process_next_job()
     refreshed_job = refresh_job_repo.get_by_id(created.job_id)
     baseline = baseline_repo.get_by_id("baseline-crm-dev-v1")
+    baseline_assets = baseline_asset_repo.list_for_baseline("baseline-crm-dev-v1")
     lineage_records = lineage_repo.list_related(
         reference_type="sanitized_baseline",
         reference_id="baseline-crm-dev-v1",
@@ -156,6 +171,10 @@ def test_baseline_refresh_worker_processes_job_and_updates_baseline():
     assert baseline is not None
     assert baseline.status.value == "active"
     assert baseline.version == "2026.01.02.1"
+    assert len(baseline_assets) == 1
+    assert baseline_assets[0].artifact_path == "/tmp/baseline-customers.jsonl"
+    assert baseline_assets[0].root_object_id == "table:source-crm-replica:public.customers"
+    assert baseline_assets[0].row_count == 2
     assert [record.event_type for record in lineage_records] == [
         "baseline_materialized",
         "baseline_validated",

@@ -6,6 +6,7 @@ from typing import Protocol
 from sanitized_data_platform.domain.entities import (
     ArtifactPublishJob,
     AuditEvent,
+    BaselineTableAsset,
     BaselineRefreshJob,
     BaselineRefreshSchedule,
     DataSource,
@@ -63,6 +64,15 @@ class BaselineRepository(Protocol):
     def get_by_id(self, baseline_id: str) -> SanitizedBaseline | None: ...
     def add(self, baseline: SanitizedBaseline) -> None: ...
     def save(self, baseline: SanitizedBaseline) -> None: ...
+
+
+class BaselineAssetRepository(Protocol):
+    def list_for_baseline(self, baseline_id: str) -> list[BaselineTableAsset]: ...
+    def replace_for_baseline(
+        self,
+        baseline_id: str,
+        assets: list[BaselineTableAsset],
+    ) -> None: ...
 
 
 class ValidationRepository(Protocol):
