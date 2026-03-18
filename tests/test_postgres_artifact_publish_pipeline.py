@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import tempfile
 
 import pytest
@@ -46,12 +47,16 @@ class FakeConnection:
         self._executed = executed
         self._table_columns = table_columns
         self.committed = False
+        self.rolled_back = False
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self._executed, self._table_columns)
 
     def commit(self) -> None:
         self.committed = True
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
     def close(self) -> None:
         return None
@@ -75,13 +80,18 @@ def test_postgres_artifact_publish_pipeline_imports_jsonl_into_target_table():
     adapter = PostgreSQLArtifactPublishPipelineAdapter(
         connect=lambda _endpoint: connection
     )
+    payload = (
+        '{"customer_id": 1, "email": "a@example.internal"}\n'
+        '{"customer_id": 2, "email": "b@example.internal"}\n'
+    )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
-        handle.write('{"customer_id": 1, "email": "a@example.internal"}\n')
-        handle.write('{"customer_id": 2, "email": "b@example.internal"}\n')
+        handle.write(payload)
         handle.flush()
         artifact = replace(
             sample_extraction_artifact(),
             artifact_path=handle.name,
+            row_count=2,
+            checksum=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
         )
 
         summary = adapter.execute(
@@ -96,6 +106,8 @@ def test_postgres_artifact_publish_pipeline_imports_jsonl_into_target_table():
     assert summary["targetTable"] == "public.customers"
     assert summary["insertedRowCount"] == 2
     assert summary["rowsImported"] == 2
+    assert summary["artifactChecksumVerified"] is True
+    assert summary["artifactRowCountVerified"] is True
     assert connection.committed is True
     assert executed == [
         (
@@ -209,3 +221,30 @@ def test_postgres_artifact_publish_pipeline_rejects_missing_target_columns():
             )
 
     assert "projection does not match target table columns: email" in str(exc.value)
+
+
+def test_postgres_artifact_publish_pipeline_rejects_checksum_mismatch_before_commit():
+    connection = FakeConnection([])
+    adapter = PostgreSQLArtifactPublishPipelineAdapter(
+        connect=lambda _endpoint: connection
+    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl") as handle:
+        handle.write('{"customer_id": 1, "email": "a@example.internal"}\n')
+        handle.flush()
+        artifact = replace(
+            sample_extraction_artifact(),
+            artifact_path=handle.name,
+            row_count=1,
+            checksum="wrong-checksum",
+        )
+
+        with pytest.raises(DomainError) as exc:
+            adapter.execute(
+                job=artifact_publish_job(),
+                artifact=artifact,
+                target=sample_target(),
+            )
+
+    assert "checksum verification failed before commit" in str(exc.value)
+    assert connection.committed is False
+    assert connection.rolled_back is True

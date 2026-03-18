@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+import hashlib
 import tempfile
 
 import pytest
@@ -250,6 +251,13 @@ def test_artifact_publish_worker_uses_real_postgres_pipeline_adapter():
             replace(
                 sample_extraction_artifact(),
                 artifact_path=handle.name,
+                row_count=2,
+                checksum=hashlib.sha256(
+                    (
+                        '{"customer_id": 1, "email": "a@example.internal"}\n'
+                        '{"customer_id": 2, "email": "b@example.internal"}\n'
+                    ).encode("utf-8")
+                ).hexdigest(),
             )
         )
         created = request.create_job(
@@ -285,6 +293,8 @@ def test_artifact_publish_worker_uses_real_postgres_pipeline_adapter():
     assert completed.execution_summary["targetTable"] == "public.customers"
     assert completed.execution_summary["insertedRowCount"] == 2
     assert completed.execution_summary["rowsImported"] == 2
+    assert completed.execution_summary["artifactChecksumVerified"] is True
+    assert completed.execution_summary["artifactRowCountVerified"] is True
     assert connection.committed is True
     assert len(executed) == 3
 

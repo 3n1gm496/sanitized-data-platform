@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ class CursorLike(Protocol):
 class ConnectionLike(Protocol):
     def cursor(self) -> CursorLike: ...
     def commit(self) -> None: ...
+    def rollback(self) -> None: ...
     def close(self) -> None: ...
 
 
@@ -65,10 +67,12 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
         connection = self._connect(target.target_endpoint)
         cursor = connection.cursor()
         try:
+            checksum = hashlib.sha256()
             with open(artifact.artifact_path, encoding="utf-8") as artifact_file:
                 column_names: list[str] | None = None
                 insert_sql: str | None = None
                 for raw_line in artifact_file:
+                    checksum.update(raw_line.encode("utf-8"))
                     line = raw_line.strip()
                     if not line:
                         continue
@@ -97,7 +101,20 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
                     values = tuple(row[column_name] for column_name in column_names)
                     cursor.execute(insert_sql, values)
                     inserted_row_count += 1
+            actual_checksum = checksum.hexdigest()
+            if artifact.checksum is not None and actual_checksum != artifact.checksum:
+                raise DomainError(
+                    "Artifact publish checksum verification failed before commit."
+                )
+            if artifact.row_count != inserted_row_count:
+                raise DomainError(
+                    "Artifact publish row count verification failed before commit."
+                )
             connection.commit()
+        except Exception:
+            if hasattr(connection, "rollback"):
+                connection.rollback()
+            raise
         finally:
             cursor.close()
             connection.close()
@@ -109,6 +126,8 @@ class PostgreSQLArtifactPublishPipelineAdapter(ArtifactPublishPipelinePort):
             "targetTable": f"{schema_name}.{table_name}",
             "insertedRowCount": inserted_row_count,
             "rowsImported": inserted_row_count,
+            "artifactChecksumVerified": True,
+            "artifactRowCountVerified": True,
         }
 
     def _parse_root_table(self, root_object_id: str) -> tuple[str, str]:
