@@ -93,6 +93,7 @@ class BaselineRefreshWorker:
 
         try:
             running_time = self._clock.now()
+            self._refresh_queue.heartbeat(job.job_id)
             job = job.transition_to(BaselineRefreshStatus.RUNNING, updated_at=running_time)
             self._refresh_jobs.save(job)
             self._record_event(job.job_id, "baseline_refresh_started", job.requested_by, running_time)
@@ -163,6 +164,7 @@ class BaselineRefreshWorker:
                 completed_time,
                 details=job.result_summary,
             )
+            self._refresh_queue.complete(job.job_id)
         except Exception as exc:
             failed_time = self._clock.now()
             failed_job = job.transition_to(
@@ -178,6 +180,7 @@ class BaselineRefreshWorker:
                 failed_time,
                 details={"error": str(exc)},
             )
+            self._refresh_queue.complete(failed_job.job_id)
             raise
 
         return job.job_id

@@ -77,6 +77,7 @@ class ArtifactPublishWorker:
 
         try:
             started_at = self._clock.now()
+            self._queue.heartbeat(job.job_id)
             job = job.transition_to(JobStatus.PUBLISHING, updated_at=started_at)
             self._jobs.save(job)
             self._record_event(
@@ -110,6 +111,7 @@ class ArtifactPublishWorker:
                 completed_at,
                 details=summary,
             )
+            self._queue.complete(job.job_id)
         except Exception as exc:
             failed_at = self._clock.now()
             failed_job = job.transition_to(
@@ -125,6 +127,7 @@ class ArtifactPublishWorker:
                 failed_at,
                 details={"error": str(exc)},
             )
+            self._queue.complete(failed_job.job_id)
             raise
 
         return job.job_id

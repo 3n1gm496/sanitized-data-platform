@@ -235,6 +235,9 @@ class InMemoryPublishJobRepository:
     def get_by_id(self, job_id: str) -> PublishJob | None:
         return self._items.get(job_id)
 
+    def list_all(self) -> list[PublishJob]:
+        return list(self._items.values())
+
     def save(self, job: PublishJob) -> None:
         self._items[job.job_id] = job
 
@@ -383,6 +386,12 @@ class InMemoryJobQueue:
             return None
         return self._items.popleft()
 
+    def heartbeat(self, job_id: str) -> None:
+        return None
+
+    def complete(self, job_id: str) -> None:
+        return None
+
 
 class InMemoryBaselineRefreshQueue:
     def __init__(self) -> None:
@@ -395,6 +404,12 @@ class InMemoryBaselineRefreshQueue:
         if not self._items:
             return None
         return self._items.popleft()
+
+    def heartbeat(self, job_id: str) -> None:
+        return None
+
+    def complete(self, job_id: str) -> None:
+        return None
 
 
 class InMemoryExtractionQueue:
@@ -409,6 +424,12 @@ class InMemoryExtractionQueue:
             return None
         return self._items.popleft()
 
+    def heartbeat(self, job_id: str) -> None:
+        return None
+
+    def complete(self, job_id: str) -> None:
+        return None
+
 
 class InMemoryArtifactPublishQueue:
     def __init__(self) -> None:
@@ -421,6 +442,12 @@ class InMemoryArtifactPublishQueue:
         if not self._items:
             return None
         return self._items.popleft()
+
+    def heartbeat(self, job_id: str) -> None:
+        return None
+
+    def complete(self, job_id: str) -> None:
+        return None
 
 
 class AllowAllPolicy:

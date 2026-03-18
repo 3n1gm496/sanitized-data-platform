@@ -75,6 +75,7 @@ class ExtractionWorker:
 
         try:
             running_time = self._clock.now()
+            self._queue.heartbeat(job.job_id)
             job = job.transition_to(ExtractionJobStatus.RUNNING, updated_at=running_time)
             self._jobs.save(job)
             self._record_event(job.job_id, "extraction_job_started", job.requested_by, running_time)
@@ -114,6 +115,7 @@ class ExtractionWorker:
                 completed_time,
                 details=summary,
             )
+            self._queue.complete(job.job_id)
         except Exception as exc:
             failed_time = self._clock.now()
             failed_job = job.transition_to(
@@ -129,6 +131,7 @@ class ExtractionWorker:
                 failed_time,
                 details={"error": str(exc)},
             )
+            self._queue.complete(failed_job.job_id)
             raise
 
         return job.job_id

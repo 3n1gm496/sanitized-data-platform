@@ -1,0 +1,175 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_SERVICE_NAME: Sanitized Data Platform
+      SDP_API_HOST: 0.0.0.0
+      SDP_API_PORT: "8000"
+      SDP_PUBLIC_BASE_URL: http://localhost:8000
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+    ports:
+      - "8000:8000"
+    volumes:
+      - artifact_data:/var/lib/sanitized-data-platform/artifacts
+      - baseline_data:/var/lib/sanitized-data-platform/baselines
+    depends_on:
+      - control-plane-postgres
+
+  worker-publish:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: publish
+      SDP_WORKER_ID: worker-publish
+    volumes:
+      - artifact_data:/var/lib/sanitized-data-platform/artifacts
+      - baseline_data:/var/lib/sanitized-data-platform/baselines
+    depends_on:
+      - control-plane-postgres
+
+  worker-extraction:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: extraction
+      SDP_WORKER_ID: worker-extraction
+    volumes:
+      - artifact_data:/var/lib/sanitized-data-platform/artifacts
+      - baseline_data:/var/lib/sanitized-data-platform/baselines
+    depends_on:
+      - control-plane-postgres
+
+  worker-artifact-publish:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: artifact_publish
+      SDP_WORKER_ID: worker-artifact-publish
+    volumes:
+      - artifact_data:/var/lib/sanitized-data-platform/artifacts
+      - baseline_data:/var/lib/sanitized-data-platform/baselines
+    depends_on:
+      - control-plane-postgres
+
+  worker-baseline-refresh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: baseline_refresh
+      SDP_WORKER_ID: worker-baseline-refresh
+    volumes:
+      - artifact_data:/var/lib/sanitized-data-platform/artifacts
+      - baseline_data:/var/lib/sanitized-data-platform/baselines
+    depends_on:
+      - control-plane-postgres
+
+  worker-refresh-schedule-dispatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: refresh_schedule_dispatch
+      SDP_WORKER_ID: worker-refresh-schedule-dispatch
+      SDP_WORKER_MAX_CYCLES: "1"
+    depends_on:
+      - control-plane-postgres
+
+  worker-artifact-retention:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: artifact_retention
+      SDP_WORKER_ID: worker-artifact-retention
+      SDP_WORKER_MAX_CYCLES: "1"
+    depends_on:
+      - control-plane-postgres
+
+  worker-artifact-cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: artifact_cleanup
+      SDP_WORKER_ID: worker-artifact-cleanup
+      SDP_WORKER_MAX_CYCLES: "1"
+    depends_on:
+      - control-plane-postgres
+
+  worker-stale-job-recovery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "sanitized_data_platform.bootstrap.worker_runtime"]
+    environment:
+      SDP_BOOTSTRAP_MODE: seed
+      SDP_ENVIRONMENT: compose
+      SDP_CONTROL_PLANE_DSN: postgresql://sanitized:sanitized@control-plane-postgres:5432/sanitized_control_plane
+      SDP_WORKER_KIND: stale_job_recovery
+      SDP_WORKER_ID: worker-stale-job-recovery
+      SDP_WORKER_MAX_CYCLES: "1"
+    depends_on:
+      - control-plane-postgres
+
+  frontend:
+    build:
+      context: ./frontend/app
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "4173:4173"
+    depends_on:
+      - api
+
+  control-plane-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sanitized_control_plane
+      POSTGRES_USER: sanitized
+      POSTGRES_PASSWORD: sanitized
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  artifact_data:
+  baseline_data:
+  postgres_data:

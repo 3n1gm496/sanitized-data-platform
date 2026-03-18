@@ -41,6 +41,16 @@ class SystemSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSummary:
+    source_id: str
+    system_id: str
+    system_name: str
+    engine_type: DatabaseEngine
+    database_name: str
+    access_mode: str
+
+
+@dataclass(frozen=True, slots=True)
 class EngineCapabilityView:
     engine_type: str
     metadata_discovery_supported: bool

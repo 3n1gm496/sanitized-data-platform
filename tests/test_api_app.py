@@ -521,6 +521,7 @@ def test_api_lists_systems_and_creates_job():
     app = build_api()
 
     systems_response = app.handle("GET", "/api/v1/systems")
+    sources_response = app.handle("GET", "/api/v1/sources")
     create_response = app.handle(
         "POST",
         "/api/v1/jobs",
@@ -534,10 +535,21 @@ def test_api_lists_systems_and_creates_job():
 
     assert systems_response.status_code == 200
     assert systems_response.body[0]["name"] == "CRM"
+    assert sources_response.status_code == 200
+    assert sources_response.body[0]["source_id"] == "source-crm-replica"
     assert create_response.status_code == 202
     assert create_response.body["status"] == "pending"
     assert create_response.body["sanitized_baseline_id"] == "baseline-crm-dev-v1"
     assert create_response.body["baseline_validation_summary"]["status"] == "passed"
+
+
+def test_api_lists_publish_jobs():
+    app = build_api()
+
+    response = app.handle("GET", "/api/v1/jobs")
+
+    assert response.status_code == 200
+    assert response.body == []
 
 
 def test_api_lists_runtime_engine_capabilities():

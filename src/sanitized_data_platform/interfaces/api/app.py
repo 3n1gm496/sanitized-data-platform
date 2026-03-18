@@ -121,6 +121,10 @@ class ApiApp:
                 environments = [asdict(item) for item in self._catalog.list_environments()]
                 return ApiResponse(status_code=200, body=environments)
 
+            if method == "GET" and path == "/api/v1/sources":
+                sources = [asdict(item) for item in self._catalog.list_sources()]
+                return ApiResponse(status_code=200, body=sources)
+
             if method == "GET" and path == "/api/v1/dataset-profiles":
                 profiles = self._catalog.list_dataset_profiles(
                     source_id=query.get("sourceId"),
@@ -406,6 +410,10 @@ class ApiApp:
                 )
                 job = self._publish_requests.create_job(command)
                 return ApiResponse(status_code=202, body=asdict(job))
+
+            if method == "GET" and path == "/api/v1/jobs":
+                jobs = self._job_monitoring.list_jobs()
+                return ApiResponse(status_code=200, body=[asdict(job) for job in jobs])
 
             if method == "GET" and path.startswith("/api/v1/jobs/") and path.endswith("/lineage"):
                 job_id = path.removeprefix("/api/v1/jobs/").removesuffix("/lineage")

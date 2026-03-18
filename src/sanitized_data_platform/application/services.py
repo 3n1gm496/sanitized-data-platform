@@ -84,6 +84,7 @@ from .dto import (
     RelationshipView,
     ValidationReportDetailView,
     SystemSummary,
+    SourceSummary,
     TransformationPolicyView,
     ValidationSummaryView,
     RefreshScheduleView,
@@ -161,6 +162,19 @@ class CatalogQueryService:
 
     def list_environments(self):
         return self._environments.list_active()
+
+    def list_sources(self) -> list[SourceSummary]:
+        return [
+            SourceSummary(
+                source_id=source.source_id,
+                system_id=source.system_id,
+                system_name=source.system_name,
+                engine_type=source.engine_type,
+                database_name=source.database_name,
+                access_mode=source.access_mode,
+            )
+            for source in sorted(self._data_sources.list_active(), key=lambda item: item.system_id)
+        ]
 
     def list_dataset_profiles(
         self,
@@ -2708,6 +2722,10 @@ class JobMonitoringService:
         if job is None:
             raise DomainError(f"Unknown publish job: {job_id}")
         return JobView.from_job(job)
+
+    def list_jobs(self) -> list[JobView]:
+        jobs = sorted(self._jobs.list_all(), key=lambda job: job.created_at, reverse=True)
+        return [JobView.from_job(job) for job in jobs]
 
     def list_audit_events(self, subject_id: str):
         return self._audits.list_for_subject(subject_id)
